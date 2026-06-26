@@ -58,7 +58,13 @@ public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> impl
     private com.zsc.system.mapper.SysUserMapper sysUserMapper;
 
     /**
-     * 管理员禁止执行用户专属操作
+     * 校验当前用户不是管理员/审核员
+     * 用于防止管理员角色执行普通用户专属操作（新增、编辑、删除票据等）
+     * <p>
+     * 权限判断逻辑：
+     * - 拥有 biz:bill:review 权限即为审核员/管理员角色
+     * - 超级管理员也拥有该权限，同样不能执行用户操作
+     *
      */
     private void checkNotAdmin() {
         if (SecurityUtils.hasPermi("biz:bill:review")) {
