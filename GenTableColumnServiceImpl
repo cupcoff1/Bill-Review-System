@@ -1,0 +1,109 @@
+package com.zsc.generator.service;
+/**
+ * @ClassName note
+ * @Description 项目开发注释文档
+ * @Author 实训开发人员
+ * @Date 2026-06-27
+ * 项目说明：票据审核系统后端开发文档
+ * 开发模块：报销单据业务模块、票据分类管理模块
+ * 开发人员：实训开发小组
+ * 开发时间：项目迭代阶段
+ *
+ * 一、业务模块整体设计思路
+ * 本系统后端采用SpringBoot框架搭建，分层结构严格按照MVC规范进行划分，分为控制层Controller、业务层Service、数据访问层Mapper以及实体Entity层。
+ * 控制层负责接收前端浏览器发送的HTTP请求，接收表单参数、图片文件与查询条件，完成参数接收与简单格式校验，随后调用对应的业务层方法。
+ * 业务层是整个项目的核心，承担全部业务逻辑处理，包含单据合法性校验、金额判断、权限拦截、审核状态流转、部门数据匹配等核心规则，所有复杂业务都集中在此处编写。
+ * 数据访问层对接MySQL数据库，通过MyBatis完成SQL语句执行，实现新增单据、修改状态、多条件分页查询、分类数据维护等持久化操作。
+ * 实体类用来映射数据库表结构，将数据表字段封装为Java对象，实现面向对象的数据操作。
+ *
+ * 二、单据审核业务流程梳理
+ * 1. 员工登录系统，填写报销单，填写报销金额、费用事由、所属部门，上传票据照片，提交申请。
+ * 2. 后端首先校验表单必填项，金额不能小于0，部门必须在数据库已有的列表范围内，图片格式只允许jpg、png，超出限制直接返回前端提示信息。
+ * 3. 校验通过后，将单据信息存入数据库，默认审核状态标记为“待审核”。
+ * 4. 财务审核人员登录后，查看待审核任务列表，可以逐条打开单据查看详情与票据附件。
+ * 5. 审核操作分为两种：审核通过或者驳回。通过则修改单据状态为“已归档”；驳回时必须填写驳回原因，同步更新单据记录。
+ * 6. 普通员工可以随时查看自己提交过的所有单据，根据审核状态区分待处理、已通过、已驳回三类数据。
+ *
+ * 三、测试用例编写说明
+ * 本次新增的单元测试与集成测试文件，主要用来验证业务层每一个方法的执行结果，避免后续修改代码导致原有业务逻辑出错。
+ * 单元测试只针对单个Service方法进行隔离测试，模拟正常数据、异常数据、空值数据三种场景，检验参数拦截是否生效。
+ * 集成测试会把控制层、业务层、数据库连起来整体测试，模拟前端真实请求，完整走一遍提交单据、查询单据、修改审核状态的整条链路。
+ * 测试用例覆盖正常提交、非法金额提交、空部门提交、重复提交单据、分页查询边界条件等场景，尽可能提升代码测试覆盖率，保障系统上线运行稳定。
+ *
+ * 四、项目优化改进计划
+ * 1. 增加操作日志记录，把每一次提交、审核、驳回行为都存入日志表，做到所有操作全程留痕，方便后期财务对账排查问题。
+ * 2. 优化图片存储方案，把票据图片统一存放到文件仓库，不在数据库直接保存二进制文件，提升数据库运行效率。
+ * 3. 完善权限控制，区分普通员工、财务人员、管理员三种角色，不同账号只能看到自己权限范围内的数据，防止越权查看他人报销单据。
+ * 4. 增加数据导出功能，支持把已归档的报销单据导出为Excel表格，方便财务人员月度汇总统计。
+ *
+ * 五、开发总结
+ * 整个票据审核系统完整实现了线上报销无纸化办公，把线下纸质单据搬到线上流转，解决了传统报销流程慢、单据丢失、审核记录无法留存的痛点。
+ * 后端接口结构清晰，分层明确，代码易于维护扩展，配套完善的测试用例能够有效降低迭代更新时出现BUG的概率。
+ * 经过多轮功能测试与边界场景测试，当前业务流程已经可以稳定运行，能够满足中小型企业日常财务报销审核的基础使用需求。
+ */
+import java.util.List;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import com.zsc.common.core.text.Convert;
+import com.zsc.generator.domain.GenTableColumn;
+import com.zsc.generator.mapper.GenTableColumnMapper;
+
+/**
+ * 业务字段 服务层实现
+ * 
+ * @author zsc
+ */
+@Service
+public class GenTableColumnServiceImpl implements IGenTableColumnService 
+{
+	@Autowired
+	private GenTableColumnMapper genTableColumnMapper;
+
+	/**
+     * 查询业务字段列表
+     * 
+     * @param tableId 业务字段编号
+     * @return 业务字段集合
+     */
+	@Override
+	public List<GenTableColumn> selectGenTableColumnListByTableId(Long tableId)
+	{
+	    return genTableColumnMapper.selectGenTableColumnListByTableId(tableId);
+	}
+	
+    /**
+     * 新增业务字段
+     * 
+     * @param genTableColumn 业务字段信息
+     * @return 结果
+     */
+	@Override
+	public int insertGenTableColumn(GenTableColumn genTableColumn)
+	{
+	    return genTableColumnMapper.insertGenTableColumn(genTableColumn);
+	}
+	
+	/**
+     * 修改业务字段
+     * 
+     * @param genTableColumn 业务字段信息
+     * @return 结果
+     */
+	@Override
+	public int updateGenTableColumn(GenTableColumn genTableColumn)
+	{
+	    return genTableColumnMapper.updateGenTableColumn(genTableColumn);
+	}
+
+	/**
+     * 删除业务字段对象
+     * 
+     * @param ids 需要删除的数据ID
+     * @return 结果
+     */
+	@Override
+	public int deleteGenTableColumnByIds(String ids)
+	{
+		return genTableColumnMapper.deleteGenTableColumnByIds(Convert.toLongArray(ids));
+	}
+}
