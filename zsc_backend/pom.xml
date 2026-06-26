@@ -216,6 +216,22 @@
                 <version>${zsc.version}</version>
             </dependency>
 
+            <!-- LangChain4j BOM (管理核心模块版本) -->
+            <dependency>
+                <groupId>dev.langchain4j</groupId>
+                <artifactId>langchain4j-bom</artifactId>
+                <version>1.0.0-beta4</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- LangChain4j Community (社区模块，不在核心 BOM 中) -->
+            <dependency>
+                <groupId>dev.langchain4j</groupId>
+                <artifactId>langchain4j-community-redis</artifactId>
+                <version>1.0.0-beta4</version>
+            </dependency>
+
         </dependencies>
     </dependencyManagement>
 

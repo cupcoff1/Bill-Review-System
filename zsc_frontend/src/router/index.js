@@ -16,12 +16,12 @@ import Layout from '@/layout'
  * roles: ['admin', 'common']       // 访问路由的角色权限
  * permissions: ['a:a:a', 'b:b:b']  // 访问路由的菜单权限
  * meta : {
-    noCache: true                   // 如果设置为true，则不会被 <keep-alive> 缓存(默认 false)
-    title: 'title'                  // 设置该路由在侧边栏和面包屑中展示的名字
-    icon: 'svg-name'                // 设置该路由的图标，对应路径src/assets/icons/svg
-    breadcrumb: false               // 如果设置为false，则不会在breadcrumb面包屑中显示
-    activeMenu: '/system/user'      // 当路由设置了该属性，则会高亮相对应的侧边栏。
-  }
+ noCache: true                   // 如果设置为true，则不会被 <keep-alive> 缓存(默认 false)
+ title: 'title'                  // 设置该路由在侧边栏和面包屑中展示的名字
+ icon: 'svg-name'                // 设置该路由的图标，对应路径src/assets/icons/svg
+ breadcrumb: false               // 如果设置为false，则不会在breadcrumb面包屑中显示
+ activeMenu: '/system/user'      // 当路由设置了该属性，则会高亮相对应的侧边栏。
+ }
  */
 
 // 公共路由
@@ -96,6 +96,20 @@ export const dynamicRoutes = [
     ]
   },
   {
+    path: '/admin/aiAssistant',
+    component: Layout,
+    hidden: false,
+    roles: ['admin_user'],
+    children: [
+      {
+        path: '',
+        component: () => import('@/views/biz/admin/aiAssistant/index'),
+        name: 'AiAssistant',
+        meta: { title: 'AI助手', icon: 'guide' }
+      }
+    ]
+  },
+  {
     path: '/system/user-auth',
     component: Layout,
     hidden: true,
@@ -148,62 +162,6 @@ export const dynamicRoutes = [
         component: () => import('@/views/monitor/job/log'),
         name: 'JobLog',
         meta: { title: '调度日志', activeMenu: '/monitor/job' }
-      }
-    ]
-  },
-  {
-    path: '/bill/reviewer-detail',
-    component: Layout,
-    hidden: true,
-    permissions: ['biz:bill:review'],
-    children: [
-      {
-        path: '',
-        component: () => import('@/views/biz/bill/reviewerDetail/index'),
-        name: 'ReviewerDetail',
-        meta: { title: '审核员票据详情', icon: 'bill' }
-      }
-    ]
-  },
-  {
-    path: '/admin/super/bill-detail',
-    component: Layout,
-    hidden: true,
-    permissions: ['biz:admin:list'],
-    children: [
-      {
-        path: '',
-        component: () => import('@/views/admin/super/billDetail/index'),
-        name: 'AdminBillDetail',
-        meta: { title: '票据详情', activeMenu: '/admin/super' }
-      }
-    ]
-  },
-  {
-    path: '/admin/super/user-detail',
-    component: Layout,
-    hidden: true,
-    permissions: ['biz:admin:list'],
-    children: [
-      {
-        path: '',
-        component: () => import('@/views/admin/super/userDetail/index'),
-        name: 'AdminUserDetail',
-        meta: { title: '用户详情', activeMenu: '/admin/super' }
-      }
-    ]
-  },
-  {
-    path: '/admin/register-review',
-    component: Layout,
-    hidden: true,
-    permissions: ['biz:admin:list'],
-    children: [
-      {
-        path: '',
-        component: () => import('@/views/biz/admin/registerReview/index'),
-        name: 'AdminRegisterReview',
-        meta: { title: '注册审核', activeMenu: '/admin' }
       }
     ]
   },

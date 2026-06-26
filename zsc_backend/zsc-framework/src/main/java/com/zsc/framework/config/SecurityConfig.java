@@ -1,5 +1,6 @@
 package com.zsc.framework.config;
 
+import jakarta.servlet.DispatcherType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -98,6 +99,8 @@ public class SecurityConfig
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             // 注解标记允许匿名访问的 url
             .authorizeHttpRequests((requests) -> {
+                // SSE 异步调度不过滤器，避免 SecurityContext 丢失
+                requests.dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll();
                 permitAllUrl.getUrls().forEach(url -> requests.requestMatchers(url).permitAll());
                 // 对于登录 login 注册 register 验证码 captchaImage 允许匿名访问
                 requests.requestMatchers("/login", "/register", "/captchaImage", "/api/register-request").permitAll()

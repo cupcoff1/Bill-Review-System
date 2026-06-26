@@ -142,3 +142,32 @@ xss:
   excludes: /system/notice
   # 匹配链接
   urlPatterns: /system/*,/monitor/*,/tool/*
+
+# ==================== LangChain4j AI Configuration ====================
+# 该配置用于集成LangChain4j框架与阿里云通义千问（DashScope）大模型服务
+langchain4j:
+  open-ai:
+    chat-model:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      # API密钥自行配置，值为阿里云DashScope的API Key
+      api-key:
+      model-name: qwen-plus
+      max-tokens: 4096
+      temperature: 0.1
+      log-requests: true
+      log-responses: true
+    streaming-chat-model:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      # API密钥自行配置，值为阿里云DashScope的API Key
+      api-key:
+      model-name: qwen-plus
+      max-tokens: 4096
+      temperature: 0.1
+      log-requests: true
+      log-responses: true
+    embedding-model:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      # API密钥自行配置，值为阿里云DashScope的API Key
+      api-key:
+      model-name: text-embedding-v3
+      max-segments-per-batch: 10
