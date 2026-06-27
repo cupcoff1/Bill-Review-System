@@ -180,6 +180,25 @@ POST /api/bill/review
 
 ---
 
+### 6.8 操作日志自动导出配置
+
+| 项 | 值 |
+|------|------|
+| 接口 | `GET /api/admin/operlog-export-interval` |
+| 权限 | `biz:admin:list` |
+| 返回 | `{ data: 10 }`（当前间隔分钟数，0=关闭） |
+
+| 项 | 值 |
+|------|------|
+| 接口 | `PUT /api/admin/operlog-export-interval` |
+| 权限 | `biz:admin:list` |
+| 请求体 | `{ "interval": 10 }`（0-1440 分钟） |
+| 说明 | 设 0 关闭，设 N>0 则每 N 分钟自动导出 Excel 并清空日志 |
+
+定时任务 `OperLogAutoExportTask` 每 30 秒检查一次，距离上次导出时间超过配置间隔时触发导出。导出文件存放于项目根目录 `exports/` 文件夹。
+
+---
+
 ## 7. 票据编号生成算法
 
 ```
