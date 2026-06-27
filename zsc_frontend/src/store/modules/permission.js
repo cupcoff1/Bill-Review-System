@@ -48,7 +48,7 @@ const usePermissionStore = defineStore(
               const userRoles = useUserStore().roles
               const filteredAsyncRoutes = asyncRoutes.filter(route => {
                 if (route.path === '/admin/aiAssistant') {
-                  return userRoles.includes('admin_user')
+                  return userRoles.some(r => ['admin', 'admin_user'].includes(r))
                 }
                 return true
               })

@@ -218,6 +218,40 @@ public class SysAdminController extends BaseController {
         return success(result);
     }
 
+    @Autowired
+    private com.zsc.system.service.ISysConfigService configService;
+
+    /**
+     * 获取操作日志自动导出间隔（分钟，0=关闭）
+     */
+    @PreAuthorize("@ss.hasPermi('biz:admin:list')")
+    @GetMapping("/operlog-export-interval")
+    public AjaxResult getExportInterval() {
+        String val = configService.selectConfigByKey("sys.operlog.autoExportInterval");
+        return success(Integer.parseInt(val != null ? val : "0"));
+    }
+
+    /**
+     * 设置操作日志自动导出间隔（分钟，0=关闭）
+     */
+    @PreAuthorize("@ss.hasPermi('biz:admin:list')")
+    @PutMapping("/operlog-export-interval")
+    public AjaxResult setExportInterval(@RequestBody Map<String, Integer> body) {
+        int interval = body.getOrDefault("interval", 0);
+        if (interval < 0 || interval > 1440) {
+            return error("间隔必须为 0-1440 分钟");
+        }
+        // 通过 key 查 configId，避免 updateConfig 时 NPE
+        com.zsc.system.domain.SysConfig query = new com.zsc.system.domain.SysConfig();
+        query.setConfigKey("sys.operlog.autoExportInterval");
+        java.util.List<com.zsc.system.domain.SysConfig> list = configService.selectConfigList(null, query);
+        if (list.isEmpty()) return error("配置项不存在");
+        com.zsc.system.domain.SysConfig cfg = list.get(0);
+        cfg.setConfigValue(String.valueOf(interval));
+        configService.updateConfig(cfg);
+        return success();
+    }
+
     private Long getRoleIdByKey(String roleKey) {
         com.zsc.common.core.domain.entity.SysRole role = roleMapper.checkRoleKeyUnique(roleKey);
         if (role == null) {
