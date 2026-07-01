@@ -233,7 +233,12 @@ public class SysAdminController extends BaseController {
     @GetMapping("/operlog-export-interval")
     public AjaxResult getExportInterval() {
         String val = configService.selectConfigByKey(EXPORT_INTERVAL_KEY);
-        return success(Integer.parseInt(val != null && !val.isEmpty() ? val : "0"));
+        if (val == null || val.isBlank()) return success(0);
+        try {
+            return success(Integer.parseInt(val.trim()));
+        } catch (NumberFormatException e) {
+            return success(0);
+        }
     }
 
     /**
@@ -246,14 +251,20 @@ public class SysAdminController extends BaseController {
         if (interval < 0 || interval > 1440) {
             return error("间隔必须为 0-1440 分钟");
         }
-        // 用 selectConfig 精确匹配（不用 selectConfigList 的 LIKE 查询）
-        com.zsc.system.domain.SysConfig query = new com.zsc.system.domain.SysConfig();
-        query.setConfigKey(EXPORT_INTERVAL_KEY);
-        com.zsc.system.domain.SysConfig cfg = configMapper.selectConfig(query);
-        if (cfg == null) return error("配置项不存在，请执行最新 init-system.sql");
-
-        cfg.setConfigValue(String.valueOf(interval));
-        configService.updateConfig(cfg);
+        // 用 checkConfigKeyUnique（有 LIMIT 1），不存在则自动插入
+        com.zsc.system.domain.SysConfig cfg = configMapper.checkConfigKeyUnique(EXPORT_INTERVAL_KEY);
+        if (cfg == null) {
+            cfg = new com.zsc.system.domain.SysConfig();
+            cfg.setConfigName("操作日志自动导出间隔");
+            cfg.setConfigKey(EXPORT_INTERVAL_KEY);
+            cfg.setConfigValue(String.valueOf(interval));
+            cfg.setConfigType("Y");
+            cfg.setCreateBy(getUsername());
+            configMapper.insertConfig(cfg);
+        } else {
+            cfg.setConfigValue(String.valueOf(interval));
+            configService.updateConfig(cfg);
+        }
         return success();
     }
 
