@@ -150,7 +150,7 @@ langchain4j:
   open-ai:
     chat-model:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api-key: sk-ws-H.RYELDEX.4ckD.MEUCIERFg2QLPVGZAh_gVc_6y-JYDGuPEcFarsO1Ab5UhlidAiEAvjwMJ91pEnk3fIT2QF_11wVYDu13Fl3kNAPH9vO3aZE
+      api-key: 你的DashScope API Key
       model-name: qwen-plus
       max-tokens: 4096
       temperature: 0.1
@@ -158,7 +158,7 @@ langchain4j:
       log-responses: true
     streaming-chat-model:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api-key: sk-ws-H.RYELDEX.4ckD.MEUCIERFg2QLPVGZAh_gVc_6y-JYDGuPEcFarsO1Ab5UhlidAiEAvjwMJ91pEnk3fIT2QF_11wVYDu13Fl3kNAPH9vO3aZE
+      api-key: 你的DashScope API Key
       model-name: qwen-plus
       max-tokens: 4096
       temperature: 0.1
@@ -166,6 +166,6 @@ langchain4j:
       log-responses: true
     embedding-model:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api-key: sk-ws-H.RYELDEX.4ckD.MEUCIERFg2QLPVGZAh_gVc_6y-JYDGuPEcFarsO1Ab5UhlidAiEAvjwMJ91pEnk3fIT2QF_11wVYDu13Fl3kNAPH9vO3aZE
+      api-key: 你的DashScope API Key
       model-name: text-embedding-v3
       max-segments-per-batch: 10
