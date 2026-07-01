@@ -6,7 +6,7 @@ zsc:
   version: 3.9.1
   # 版权年份
   copyrightYear: 2026
-  # 文件路径 示例（Windows 配置 D:/zsc/uploadPath，Linux 配置 /home/zsc/uploadPath）
+  # 文件路径 示例（Windows 配置 D:/zsc/uploadPath，Linux 配置 /opt/bill-review/uploads）
   profile: /opt/bill-review/uploads
   # 获取ip地址开关
   addressEnabled: false
