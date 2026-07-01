@@ -24,11 +24,16 @@ public class OperLogAutoExportTask {
         try {
             ISysConfigService configService = SpringUtils.getBean(ISysConfigService.class);
             String intervalStr = configService.selectConfigByKey("sys.operlog.autoExportInterval");
-            if (intervalStr == null || intervalStr.isEmpty() || "0".equals(intervalStr)) {
+            if (intervalStr == null || intervalStr.isBlank() || "0".equals(intervalStr.trim())) {
                 return;
             }
-
-            int intervalMinutes = Integer.parseInt(intervalStr);
+            int intervalMinutes;
+            try {
+                intervalMinutes = Integer.parseInt(intervalStr.trim());
+            } catch (NumberFormatException e) {
+                log.warn("自动导出间隔配置非法: {}", intervalStr);
+                return;
+            }
             long currentTime = System.currentTimeMillis();
 
             // 用 Redis 记录上次导出时间，避免重复导出
