@@ -221,13 +221,18 @@ public class SysAdminController extends BaseController {
     @Autowired
     private com.zsc.system.service.ISysConfigService configService;
 
+    @Autowired
+    private com.zsc.system.mapper.SysConfigMapper configMapper;
+
+    private static final String EXPORT_INTERVAL_KEY = "sys.operlog.autoExportInterval";
+
     /**
      * 获取操作日志自动导出间隔（分钟，0=关闭）
      */
     @PreAuthorize("@ss.hasPermi('biz:admin:list')")
     @GetMapping("/operlog-export-interval")
     public AjaxResult getExportInterval() {
-        String val = configService.selectConfigByKey("sys.operlog.autoExportInterval");
+        String val = configService.selectConfigByKey(EXPORT_INTERVAL_KEY);
         return success(Integer.parseInt(val != null && !val.isEmpty() ? val : "0"));
     }
 
@@ -241,12 +246,12 @@ public class SysAdminController extends BaseController {
         if (interval < 0 || interval > 1440) {
             return error("间隔必须为 0-1440 分钟");
         }
-        // 通过 key 查 configId，避免 updateConfig 时 NPE
+        // 用 selectConfig 精确匹配（不用 selectConfigList 的 LIKE 查询）
         com.zsc.system.domain.SysConfig query = new com.zsc.system.domain.SysConfig();
-        query.setConfigKey("sys.operlog.autoExportInterval");
-        java.util.List<com.zsc.system.domain.SysConfig> list = configService.selectConfigList(null, query);
-        if (list.isEmpty()) return error("配置项不存在");
-        com.zsc.system.domain.SysConfig cfg = list.get(0);
+        query.setConfigKey(EXPORT_INTERVAL_KEY);
+        com.zsc.system.domain.SysConfig cfg = configMapper.selectConfig(query);
+        if (cfg == null) return error("配置项不存在，请执行最新 init-system.sql");
+
         cfg.setConfigValue(String.valueOf(interval));
         configService.updateConfig(cfg);
         return success();
