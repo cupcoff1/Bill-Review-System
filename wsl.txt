@@ -1,1 +1,0 @@
-\\wsl$\Ubuntu-22.04\opt\bill-review\
