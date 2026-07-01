@@ -228,7 +228,7 @@ public class SysAdminController extends BaseController {
     @GetMapping("/operlog-export-interval")
     public AjaxResult getExportInterval() {
         String val = configService.selectConfigByKey("sys.operlog.autoExportInterval");
-        return success(Integer.parseInt(val != null ? val : "0"));
+        return success(Integer.parseInt(val != null && !val.isEmpty() ? val : "0"));
     }
 
     /**

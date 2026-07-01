@@ -24,7 +24,7 @@ public class OperLogAutoExportTask {
         try {
             ISysConfigService configService = SpringUtils.getBean(ISysConfigService.class);
             String intervalStr = configService.selectConfigByKey("sys.operlog.autoExportInterval");
-            if (intervalStr == null || "0".equals(intervalStr)) {
+            if (intervalStr == null || intervalStr.isEmpty() || "0".equals(intervalStr)) {
                 return;
             }
 

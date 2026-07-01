@@ -6,7 +6,7 @@ zsc:
   version: 3.9.1
   # 版权年份
   copyrightYear: 2026
-  # 文件路径 示例（Windows 配置 D:/zsc/uploadPath，Linux 配置 /home/zsc/uploadPath）
+  # 文件路径 示例（Windows 配置 D:/zsc/uploadPath，Linux 配置 /opt/bill-review/uploads）
   profile: /opt/bill-review/uploads
   # 获取ip地址开关
   addressEnabled: false
@@ -150,7 +150,7 @@ langchain4j:
   open-ai:
     chat-model:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api-key: 你的DashScope API Key
+      api-key: sk-ws-H.RYELDEX.4ckD.MEUCIERFg2QLPVGZAh_gVc_6y-JYDGuPEcFarsO1Ab5UhlidAiEAvjwMJ91pEnk3fIT2QF_11wVYDu13Fl3kNAPH9vO3aZE
       model-name: qwen-plus
       max-tokens: 4096
       temperature: 0.1
@@ -158,7 +158,7 @@ langchain4j:
       log-responses: true
     streaming-chat-model:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api-key: 你的DashScope API Key
+      api-key: sk-ws-H.RYELDEX.4ckD.MEUCIERFg2QLPVGZAh_gVc_6y-JYDGuPEcFarsO1Ab5UhlidAiEAvjwMJ91pEnk3fIT2QF_11wVYDu13Fl3kNAPH9vO3aZE
       model-name: qwen-plus
       max-tokens: 4096
       temperature: 0.1
@@ -166,6 +166,6 @@ langchain4j:
       log-responses: true
     embedding-model:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api-key: 你的DashScope API Key
+      api-key: sk-ws-H.RYELDEX.4ckD.MEUCIERFg2QLPVGZAh_gVc_6y-JYDGuPEcFarsO1Ab5UhlidAiEAvjwMJ91pEnk3fIT2QF_11wVYDu13Fl3kNAPH9vO3aZE
       model-name: text-embedding-v3
       max-segments-per-batch: 10
