@@ -751,5 +751,6 @@ VALUES
 (3, '主框架页-侧边栏主题', 'sys.index.sideTheme', 'theme-dark', 'Y', 'admin', NOW(), '', NULL, '深色主题theme-dark，浅色主题theme-light'),
 (4, '账号自助-验证码开关', 'sys.account.captchaEnabled', 'true', 'Y', 'admin', NOW(), '', NULL, '是否开启验证码功能（true开启，false关闭）'),
 (5, '账号自助-是否开启用户注册功能', 'sys.account.registerUser', 'true', 'Y', 'admin', NOW(), '', NULL, '是否开启注册用户功能（true开启，false关闭）'),
-(6, '用户登录-黑名单列表', 'sys.login.blackIPList', '', 'Y', 'admin', NOW(), '', NULL, '设置登录IP黑名单限制，多个匹配项以;分隔，支持匹配（*通配、网段）');
+(6, '用户登录-黑名单列表', 'sys.login.blackIPList', '', 'Y', 'admin', NOW(), '', NULL, '设置登录IP黑名单限制，多个匹配项以;分隔，支持匹配（*通配、网段）'),
+(7, '操作日志自动导出间隔(分钟)', 'sys.operlog.autoExportInterval', '0', 'Y', 'admin', NOW(), '', NULL, '0=关闭,大于0表示每隔N分钟自动导出并清空操作日志');
 UNLOCK TABLES;
