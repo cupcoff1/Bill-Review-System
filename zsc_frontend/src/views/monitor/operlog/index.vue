@@ -153,7 +153,12 @@ const { queryParams, form } = toRefs(data)
 /** 查询登录日志 */
 function getList() {
   loading.value = true
-  list(proxy.addDateRange(queryParams.value, dateRange.value)).then(response => {
+  const params = proxy.addDateRange(queryParams.value, dateRange.value)
+  // 清理所有空字符串参数，避免后端 Integer 绑定报错
+  Object.keys(params).forEach(k => {
+    if (params[k] === '' || params[k] === undefined) delete params[k]
+  })
+  list(params).then(response => {
     operlogList.value = response.rows
     total.value = response.total
     loading.value = false

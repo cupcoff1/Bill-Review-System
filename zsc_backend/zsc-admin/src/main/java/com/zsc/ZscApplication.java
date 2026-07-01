@@ -18,7 +18,7 @@ public class ZscApplication
 {
     public static void main(String[] args)
     {
-        // System.setProperty("spring.devtools.restart.enabled", "false");
+//         System.setProperty("spring.devtools.restart.enabled", "false");
         SpringApplication.run(ZscApplication.class, args);
         System.out.println("票据系统启动完成 0^O");
     }
