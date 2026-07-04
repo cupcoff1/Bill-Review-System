@@ -120,6 +120,7 @@ public class AiConfig {
      *
      * 第二次启动后可注释掉 @Bean 以避免重复摄入（数据已在 Redis 中持久化）
      */
+    /*
     @Bean
     EmbeddingStoreIngestor embeddingStoreIngestor(
             EmbeddingModel embeddingModel,
@@ -144,4 +145,6 @@ public class AiConfig {
         ingestor.ingest(document);
         return ingestor;
     }
+
+     */
 }

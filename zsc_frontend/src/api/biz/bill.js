@@ -90,3 +90,19 @@ export function reviewBill(data) {
     data: data
   })
 }
+
+// 审核趋势分析（近12月审核量+通过率）
+export function getReviewTrend() {
+  return request({
+    url: '/api/bill/review-trend',
+    method: 'get'
+  })
+}
+
+// 审核构成分析（按费用类型通过金额占比）
+export function getReviewComposition() {
+  return request({
+    url: '/api/bill/review-composition',
+    method: 'get'
+  })
+}

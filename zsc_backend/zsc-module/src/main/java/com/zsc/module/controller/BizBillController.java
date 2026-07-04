@@ -10,6 +10,7 @@ import com.zsc.module.domain.dto.query.BizBillQueryDto;
 import com.zsc.module.domain.vo.BizBillDetailVo;
 import com.zsc.module.domain.vo.BizBillVo;
 import com.zsc.module.domain.vo.ReviewerStatsVo;
+import com.zsc.module.domain.vo.ReviewTrendVo;
 import com.zsc.module.domain.vo.TrendItemVo;
 import com.zsc.module.service.BizBillService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -62,17 +63,31 @@ public class BizBillController {
     }
 
     @Operation(summary = "本月提交趋势")
-    @PreAuthorize("@ss.hasPermi('biz:bill:list')")
+    @PreAuthorize("@ss.hasPermi('biz:bill:list') or @ss.hasPermi('biz:bill:review')")
     @GetMapping("/trend")
     public ResultVo<List<TrendItemVo>> trend() {
         return ResultVo.ok(bizBillService.getMonthlyTrend());
     }
 
     @Operation(summary = "各类别金额汇总")
-    @PreAuthorize("@ss.hasPermi('biz:bill:list')")
+    @PreAuthorize("@ss.hasPermi('biz:bill:list') or @ss.hasPermi('biz:bill:review')")
     @GetMapping("/category-summary")
     public ResultVo<List<TrendItemVo>> categorySummary() {
         return ResultVo.ok(bizBillService.getCategoryAmountSummary());
+    }
+
+    @Operation(summary = "审核趋势分析（近12月审核量+通过率）")
+    @PreAuthorize("@ss.hasPermi('biz:bill:review')")
+    @GetMapping("/review-trend")
+    public ResultVo<List<ReviewTrendVo>> reviewTrend() {
+        return ResultVo.ok(bizBillService.getReviewTrend());
+    }
+
+    @Operation(summary = "审核构成分析（按费用类型通过金额占比）")
+    @PreAuthorize("@ss.hasPermi('biz:bill:review')")
+    @GetMapping("/review-composition")
+    public ResultVo<List<Map<String, Object>>> reviewComposition() {
+        return ResultVo.ok(bizBillService.getReviewComposition());
     }
 
     /**
@@ -80,7 +95,7 @@ public class BizBillController {
      */
     @Operation(summary = "获取票据详情")
     @PreAuthorize("@ss.hasPermi('biz:bill:query')")
-    @GetMapping("/{id}")
+    @GetMapping("/{id:\\d+}")
     public ResultVo<BizBillDetailVo> get(@PathVariable @Min(value = 1, message = "票据ID不能小于1") Long id) {
         return ResultVo.ok(bizBillService.getBillDetail(id));
     }
@@ -130,7 +145,7 @@ public class BizBillController {
     @Operation(summary = "删除票据")
     @PreAuthorize("@ss.hasPermi('biz:bill:remove')")
     @Log(title = "票据管理", businessType = BusinessType.DELETE)
-    @DeleteMapping("/{id}")
+    @DeleteMapping("/{id:\\d+}")
     public ResultVo delete(@PathVariable @Min(value = 1, message = "票据ID不能小于1") Long id) {
         bizBillService.deleteBill(id);
         return ResultVo.ok("删除成功");

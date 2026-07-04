@@ -96,6 +96,48 @@ export const dynamicRoutes = [
     ]
   },
   {
+    path: '/admin/super/bill-detail',
+    component: Layout,
+    hidden: true,
+    permissions: ['biz:admin:list'],
+    children: [
+      {
+        path: '',
+        component: () => import('@/views/admin/super/billDetail/index'),
+        name: 'SuperAdminBillDetail',
+        meta: { title: '票据详情', activeMenu: '/admin/super' }
+      }
+    ]
+  },
+  {
+    path: '/admin/super/user-detail',
+    component: Layout,
+    hidden: true,
+    permissions: ['biz:admin:list'],
+    children: [
+      {
+        path: '',
+        component: () => import('@/views/admin/super/userDetail/index'),
+        name: 'SuperAdminUserDetail',
+        meta: { title: '用户详情', activeMenu: '/admin/super' }
+      }
+    ]
+  },
+  {
+    path: '/bill/reviewer-detail',
+    component: Layout,
+    hidden: true,
+    roles: ['reviewer', 'admin_user'],
+    children: [
+      {
+        path: '',
+        component: () => import('@/views/biz/bill/reviewerDetail/index'),
+        name: 'ReviewerBillDetail',
+        meta: { title: '今日票据详情', activeMenu: '/bill/manage' }
+      }
+    ]
+  },
+  {
     path: '/admin/aiAssistant',
     component: Layout,
     hidden: false,

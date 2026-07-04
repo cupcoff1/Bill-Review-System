@@ -18,6 +18,7 @@ import com.zsc.module.domain.vo.BizBillDetailVo;
 import com.zsc.module.domain.vo.BizBillFileVo;
 import com.zsc.module.domain.vo.BizBillVo;
 import com.zsc.module.domain.vo.ReviewerStatsVo;
+import com.zsc.module.domain.vo.ReviewTrendVo;
 import com.zsc.module.domain.vo.TrendItemVo;
 import com.zsc.module.mapper.BizAuditLogMapper;
 import com.zsc.module.mapper.BizBillFileMapper;
@@ -34,6 +35,7 @@ import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -606,6 +608,103 @@ public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> impl
             new LambdaQueryWrapper<BizAuditLog>().in(BizAuditLog::getBillId, billIds));
         // 删票据
         this.removeByIds(billIds);
+    }
+
+    @Override
+    public List<ReviewTrendVo> getReviewTrend() {
+        String username = SecurityUtils.getUsername();
+        Calendar now = Calendar.getInstance();
+
+        // 近12个月
+        Calendar start = Calendar.getInstance();
+        start.add(Calendar.MONTH, -11);
+        start.set(Calendar.DAY_OF_MONTH, 1);
+        start.set(Calendar.HOUR_OF_DAY, 0);
+        start.set(Calendar.MINUTE, 0);
+        start.set(Calendar.SECOND, 0);
+        start.set(Calendar.MILLISECOND, 0);
+
+        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+
+        // 查该审核员近12个月审核过的票据（已通过+已退回）
+        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+            .ge(BizBill::getAuditTime, startStr)
+            .le(BizBill::getAuditTime, endStr)
+            .eq(BizBill::getAuditBy, username)
+            .in(BizBill::getStatus, "2", "3");
+        List<BizBill> bills = this.list(wrapper);
+
+        // 按月份分组统计
+        Map<String, long[]> monthMap = new LinkedHashMap<>();
+        SimpleDateFormat monthFmt = new SimpleDateFormat("yyyy-MM");
+        for (int i = 11; i >= 0; i--) {
+            Calendar c = Calendar.getInstance();
+            c.add(Calendar.MONTH, -i);
+            String key = monthFmt.format(c.getTime());
+            monthMap.put(key, new long[]{0, 0}); // [总量, 通过量]
+        }
+
+        for (BizBill bill : bills) {
+            if (bill.getAuditTime() == null) continue;
+            String key = monthFmt.format(bill.getAuditTime());
+            long[] arr = monthMap.get(key);
+            if (arr != null) {
+                arr[0]++;
+                if ("2".equals(bill.getStatus())) {
+                    arr[1]++;
+                }
+            }
+        }
+
+        List<ReviewTrendVo> result = new ArrayList<>();
+        monthMap.forEach((month, arr) -> {
+            double rate = arr[0] > 0 ? Math.round(arr[1] * 1000.0 / arr[0]) / 10.0 : 0;
+            result.add(ReviewTrendVo.builder()
+                .month(month)
+                .count(arr[0])
+                .passRate(rate)
+                .build());
+        });
+        return result;
+    }
+
+    @Override
+    public List<Map<String, Object>> getReviewComposition() {
+        String username = SecurityUtils.getUsername();
+
+        // 查该审核员审核通过的所有票据
+        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+            .eq(BizBill::getStatus, "2")
+            .eq(BizBill::getAuditBy, username);
+        List<BizBill> bills = this.list(wrapper);
+
+        // 按类别汇总金额
+        Map<Long, Long> amountMap = new LinkedHashMap<>();
+        Map<Long, String> nameMap = new HashMap<>();
+
+        for (BizBill bill : bills) {
+            Long cid = bill.getCategoryId();
+            if (cid != null) {
+                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+                if (!nameMap.containsKey(cid)) {
+                    BizCategory cat = categoryMapper.selectById(cid);
+                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+                }
+            }
+        }
+
+        long total = amountMap.values().stream().mapToLong(Long::longValue).sum();
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        amountMap.forEach((cid, amount) -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("categoryName", nameMap.getOrDefault(cid, "未知"));
+            item.put("amount", amount);
+            item.put("percent", total > 0 ? Math.round(amount * 1000.0 / total) / 10.0 : 0);
+            result.add(item);
+        });
+        return result;
     }
 
 }
