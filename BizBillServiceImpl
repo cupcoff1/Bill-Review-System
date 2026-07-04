@@ -1,0 +1,4810 @@
+package com.zsc.module.service.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.zsc.common.utils.SecurityUtils;
+import com.zsc.module.common.exception.ServiceException;
+import com.zsc.module.common.pagination.PageResult;
+import com.zsc.module.domain.dto.BizBillDto;
+import com.zsc.module.domain.dto.BizBillReviewDto;
+import com.zsc.module.domain.dto.query.BizBillQueryDto;
+import com.zsc.module.domain.entity.BizAuditLog;
+import com.zsc.module.domain.entity.BizBill;
+import com.zsc.module.domain.entity.BizBillFile;
+import com.zsc.module.domain.entity.BizCategory;
+import com.zsc.module.domain.vo.BizAuditLogVo;
+import com.zsc.module.domain.vo.BizBillDetailVo;
+import com.zsc.module.domain.vo.BizBillFileVo;
+import com.zsc.module.domain.vo.BizBillVo;
+import com.zsc.module.domain.vo.ReviewerStatsVo;
+import com.zsc.module.domain.vo.TrendItemVo;
+import com.zsc.module.domain.vo.UserBillStatsVo;
+import com.zsc.module.mapper.BizAuditLogMapper;
+import com.zsc.module.mapper.BizBillFileMapper;
+import com.zsc.module.mapper.BizBillMapper;
+import com.zsc.module.mapper.BizCategoryMapper;
+import com.zsc.module.service.BizBillService;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+/**
+ * 票据表 服务实现类
+ */
+@Service
+@Transactional
+public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> implements BizBillService {
+
+    @Autowired
+    private BizBillFileMapper fileMapper;
+
+    @Autowired
+    private BizAuditLogMapper auditLogMapper;
+
+    @Autowired
+    private BizCategoryMapper categoryMapper;
+
+    /**
+     * 管理员禁止执行用户专属操作
+     */
+    private void checkNotAdmin() {
+        if (SecurityUtils.hasPermi("biz:bill:review")) {
+            throw new ServiceException("管理员不能执行用户操作！");
+        }
+    }
+
+    // ==================== 新增 ====================
+
+    @Override
+    public void addBill(BizBillDto dto) {
+        checkNotAdmin();
+        BizBill bill = new BizBill();
+        BeanUtils.copyProperties(dto, bill);
+
+        bill.setCreateBy(SecurityUtils.getUsername());
+        bill.setCreateTime(new Date());
+
+        // 先保存草稿（用临时编号占位），再根据状态替换为正式编号
+        bill.setBillNo("DRAFT-" + System.currentTimeMillis());
+
+        if (!this.save(bill)) {
+            throw new ServiceException("系统错误，票据保存失败！");
+        }
+
+        if ("1".equals(dto.getStatus())) {
+            bill.setBillNo(generateBillNo(bill.getId()));
+            this.updateById(bill);
+        }
+
+        // 保存附件记录
+        saveAttachments(bill.getId(), dto.getAttachment());
+    }
+
+    // ==================== 查询列表 ====================
+
+    @Override
+    public PageResult<BizBillVo> queryBills(BizBillQueryDto dto) {
+        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<>();
+
+        // 普通用户只查自己的票据
+        if (!SecurityUtils.hasPermi("biz:bill:review")) {
+            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+        }
+
+        // 条件过滤
+        if (StringUtils.isNotBlank(dto.getKeywords())) {
+            wrapper.and(w -> w
+                    .like(BizBill::getTitle, dto.getKeywords())
+                    .or()
+                    .like(BizBill::getBillNo, dto.getKeywords())
+            );
+        }
+        wrapper.eq(dto.getCategoryId() != null, BizBill::getCategoryId, dto.getCategoryId())
+                .eq(StringUtils.isNotBlank(dto.getStatus()), BizBill::getStatus, dto.getStatus())
+                .like(StringUtils.isNotBlank(dto.getAuditBy()), BizBill::getAuditBy, dto.getAuditBy())
+                .like(StringUtils.isNotBlank(dto.getCreateBy()), BizBill::getCreateBy, dto.getCreateBy())
+                .ge(dto.getMinAmount() != null, BizBill::getAmount, dto.getMinAmount())
+                .le(dto.getMaxAmount() != null, BizBill::getAmount, dto.getMaxAmount())
+                .ge(StringUtils.isNotBlank(dto.getStartTime()), BizBill::getCreateTime, dto.getStartTime())
+                .le(StringUtils.isNotBlank(dto.getEndTime()), BizBill::getCreateTime, dto.getEndTime())
+                .last(buildOrderSql(dto.getSortField(), dto.getSortOrder()));
+
+        Page<BizBill> page = this.page(dto.convertToPage(), wrapper);
+
+        // 批量查类别名称
+        Map<Long, String> categoryNameMap = buildCategoryNameMap(page.getRecords());
+
+        // Entity → VO
+        List<BizBillVo> voList = page.getRecords().stream().map(bill -> {
+            BizBillVo vo = new BizBillVo();
+            BeanUtils.copyProperties(bill, vo);
+            if (bill.getCategoryId() != null) {
+                vo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+            }
+            return vo;
+        }).collect(Collectors.toList());
+
+        PageResult result = PageResult.fromPage(page);
+        result.setList(voList);
+        return result;
+    }
+
+    // ==================== 详情 ====================
+
+    @Override
+    public BizBillDetailVo getBillDetail(Long id) {
+        BizBill bill = this.getById(id);
+        if (bill == null) {
+            throw new ServiceException("票据不存在！");
+        }
+
+        // 非管理员只能查看自己的票据
+        if (!SecurityUtils.hasPermi("biz:bill:review")
+                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+            throw new ServiceException("只能查看自己的票据！");
+        }
+
+        BizBillDetailVo vo = new BizBillDetailVo();
+        BeanUtils.copyProperties(bill, vo);
+
+        // 设置状态文本
+        vo.setStatusText(getStatusText(bill.getStatus()));
+
+        // 查类别名称
+        if (bill.getCategoryId() != null) {
+            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+            if (category != null) {
+                vo.setCategoryName(category.getCategoryName());
+            }
+        }
+
+        // 查附件列表
+        List<BizBillFile> files = fileMapper.selectList(
+                new LambdaQueryWrapper<BizBillFile>()
+                        .eq(BizBillFile::getBillId, id)
+                        .orderByAsc(BizBillFile::getSortOrder)
+        );
+        vo.setFiles(files.stream().map(f -> {
+            BizBillFileVo fvo = new BizBillFileVo();
+            BeanUtils.copyProperties(f, fvo);
+            // 生成预览和下载URL
+            fvo.setPreviewUrl("/api/bill/preview/" + f.getId());
+            fvo.setDownloadUrl("/api/bill/download/" + f.getId());
+            return fvo;
+        }).collect(Collectors.toList()));
+
+        // 查审核历史
+        List<BizAuditLog> logs = auditLogMapper.selectList(
+                new LambdaQueryWrapper<BizAuditLog>()
+                        .eq(BizAuditLog::getBillId, id)
+                        .orderByDesc(BizAuditLog::getAuditTime)
+        );
+        vo.setAuditLogs(logs.stream().map(l -> {
+            BizAuditLogVo lvo = new BizAuditLogVo();
+            BeanUtils.copyProperties(l, lvo);
+            // 设置操作文本
+            lvo.setActionText("1".equals(l.getAction()) ? "通过" : "退回");
+            return lvo;
+        }).collect(Collectors.toList()));
+
+        return vo;
+    }
+
+    // ==================== 编辑 ====================
+
+    @Override
+    public void updateBill(BizBillDto dto) {
+        checkNotAdmin();
+        BizBill bill = this.getById(dto.getId());
+        if (bill == null) {
+            throw new ServiceException("票据不存在！");
+        }
+
+        // 仅草稿或已退回可编辑
+        if (!List.of("0", "3").contains(bill.getStatus())) {
+            throw new ServiceException("只能编辑草稿或已退回状态的票据！");
+        }
+
+        // 校验数据归属
+        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+            throw new ServiceException("只能编辑自己的票据！");
+        }
+
+        // 保留字段不被 null 覆盖
+        if (StringUtils.isNotBlank(dto.getAttachment())) {
+            bill.setAttachment(dto.getAttachment());
+        }
+
+        bill.setTitle(dto.getTitle());
+        bill.setCategoryId(dto.getCategoryId());
+        bill.setAmount(dto.getAmount());
+        bill.setDescription(dto.getDescription());
+        bill.setUpdateBy(SecurityUtils.getUsername());
+        bill.setUpdateTime(new Date());
+
+        if (!this.updateById(bill)) {
+            throw new ServiceException("系统错误，票据更新失败！");
+        }
+
+        // 仅当传入了新附件时才替换旧附件
+        if (StringUtils.isNotBlank(dto.getAttachment())) {
+            fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+                    .eq(BizBillFile::getBillId, bill.getId()));
+            saveAttachments(bill.getId(), dto.getAttachment());
+        }
+    }
+
+    // ==================== 提交审核 ====================
+
+    @Override
+    public void submitBill(Long id) {
+        checkNotAdmin();
+        BizBill bill = this.getById(id);
+        if (bill == null) {
+            throw new ServiceException("票据不存在！");
+        }
+
+        // 仅草稿或已退回可提交
+        if (!List.of("0", "3").contains(bill.getStatus())) {
+            throw new ServiceException("只能提交草稿或已退回状态的票据！");
+        }
+
+        // 校验数据归属
+        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+            throw new ServiceException("只能提交自己的票据！");
+        }
+
+        // 草稿有临时编号的，替换为正式编号（用主键ID保证并发唯一）
+        if (StringUtils.isBlank(bill.getBillNo()) || bill.getBillNo().startsWith("DRAFT-")) {
+            bill.setBillNo(generateBillNo(bill.getId()));
+        }
+
+        bill.setStatus("1");
+        bill.setUpdateBy(SecurityUtils.getUsername());
+        bill.setUpdateTime(new Date());
+
+        if (!this.updateById(bill)) {
+            throw new ServiceException("系统错误，票据提交失败！");
+        }
+    }
+
+    // ==================== 删除 ====================
+
+    @Override
+    public void deleteBill(Long id) {
+        checkNotAdmin();
+        BizBill bill = this.getById(id);
+        if (bill == null) {
+            throw new ServiceException("票据不存在！");
+        }
+
+        // 仅草稿可删除
+        if (!"0".equals(bill.getStatus())) {
+            throw new ServiceException("只能删除草稿状态的票据！");
+        }
+
+        // 校验数据归属
+        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+            throw new ServiceException("只能删除自己的票据！");
+        }
+
+        // 先删附件，再删票据
+        fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+                .eq(BizBillFile::getBillId, id));
+        this.removeById(id);
+    }
+
+    // ==================== 审核 ====================
+
+    @Override
+    public void reviewBill(BizBillReviewDto dto) {
+        // 校验 action 值合法性
+        if (!List.of("1", "2").contains(dto.getAction())) {
+            throw new ServiceException("无效的审核结果，action 必须为 1（通过）或 2（退回）！");
+        }
+
+        BizBill bill = this.getById(dto.getBillId());
+        if (bill == null) {
+            throw new ServiceException("票据不存在！");
+        }
+
+        // 仅已提交状态可审核
+        if (!"1".equals(bill.getStatus())) {
+            throw new ServiceException("只能审核已提交状态的票据！");
+        }
+
+        // 更新票据审核信息
+        bill.setStatus(dto.getAction().equals("1") ? "2" : "3");
+        bill.setAuditBy(SecurityUtils.getUsername());
+        bill.setAuditTime(new Date());
+        bill.setAuditComment(dto.getComment());
+        bill.setUpdateBy(SecurityUtils.getUsername());
+        bill.setUpdateTime(new Date());
+
+        if (!this.updateById(bill)) {
+            throw new ServiceException("系统错误，审核失败！");
+        }
+
+        // 记录审核历史
+        BizAuditLog log = BizAuditLog.builder()
+                .billId(dto.getBillId())
+                .action(dto.getAction())
+                .comment(dto.getComment())
+                .auditBy(SecurityUtils.getUsername())
+                .auditTime(new Date())
+                .build();
+        auditLogMapper.insert(log);
+    }
+
+    // ==================== 附件 ====================
+
+    /**
+     * 解析附件路径字符串，创建附件记录
+     * @param billId 票据ID
+     * @param attachment 逗号分隔的附件路径
+     */
+    private void saveAttachments(Long billId, String attachment) {
+        if (StringUtils.isBlank(attachment)) {
+            return;
+        }
+
+        String[] paths = attachment.split(",");
+        for (int i = 0; i < paths.length; i++) {
+            String path = paths[i].trim();
+            if (StringUtils.isBlank(path)) {
+                continue;
+            }
+
+            BizBillFile file = BizBillFile.builder()
+                    .billId(billId)
+                    .fileName(path.substring(path.lastIndexOf("/") + 1))
+                    .filePath(path)
+                    .sortOrder(i)
+                    .createBy(SecurityUtils.getUsername())
+                    .createTime(new Date())
+                    .build();
+            fileMapper.insert(file);
+        }
+    }
+
+    // ==================== 工具方法 ====================
+
+    /**
+     * 批量查询类别ID对应的类别名称
+     */
+    private String buildOrderSql(String sortField, String sortOrder) {
+        if (sortField == null || sortField.isEmpty()) return "ORDER BY create_time DESC";
+        String col = switch (sortField) {
+            case "amount" -> "amount";
+            case "createTime" -> "create_time";
+            case "auditTime" -> "audit_time";
+            default -> "create_time";
+        };
+        String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+        return "ORDER BY " + col + " " + dir;
+    }
+
+    private Map<Long, String> buildCategoryNameMap(List<BizBill> bills) {
+        List<Long> categoryIds = bills.stream()
+                .map(BizBill::getCategoryId)
+                .filter(id -> id != null)
+                .distinct()
+                .collect(Collectors.toList());
+
+        if (categoryIds.isEmpty()) {
+            return new java.util.HashMap<>();
+        }
+
+        List<BizCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+        return categories.stream()
+                .collect(Collectors.toMap(BizCategory::getCategoryId, BizCategory::getCategoryName, (a, b) -> a, java.util.HashMap::new));
+    }
+
+    /**
+     * 生成票据编号: BILL-yyyyMMdd-{billId}
+     * 使用票据主键ID保证并发安全，避免批量提交时编号重复
+     */
+    private String generateBillNo(Long billId) {
+        String dateStr = new SimpleDateFormat("yyyyMMdd").format(new Date());
+        return String.format("BILL-%s-%04d", dateStr, billId);
+    }
+
+    /**
+     * 获取状态文本
+     */
+    private String getStatusText(String status) {
+        if (status == null) return "未知";
+        switch (status) {
+            case "0": return "草稿";
+            case "1": return "已提交";
+            case "2": return "已通过";
+            case "3": return "已退回";
+            default: return "未知";
+        }
+    }
+
+    @Override
+    public List<TrendItemVo> getMonthlyTrend() {
+        Calendar now = Calendar.getInstance();
+        int year = now.get(Calendar.YEAR);
+        int month = now.get(Calendar.MONTH) + 1;
+
+        Calendar start = Calendar.getInstance();
+        start.set(year, month - 1, 1, 0, 0, 0);
+        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+
+        LambdaQueryWrapper<BizBill> trendWrapper = new LambdaQueryWrapper<BizBill>()
+                .ge(BizBill::getUpdateTime, startStr)
+                .le(BizBill::getUpdateTime, endStr)
+                .ne(BizBill::getStatus, "0");
+        if (SecurityUtils.hasPermi("*:*:*")) {
+            // 超管看全量
+        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+            trendWrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+        } else {
+            trendWrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+        }
+        List<BizBill> bills = this.list(trendWrapper);
+
+        Map<String, Long> weekMap = new LinkedHashMap<>();
+        for (int i = 1; i <= 4; i++) {
+            weekMap.put("第" + i + "周", 0L);
+        }
+
+        for (BizBill bill : bills) {
+            Calendar cal = Calendar.getInstance();
+            cal.setTime(bill.getUpdateTime());
+            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+            String weekLabel = "第" + ((dayOfMonth - 1) / 7 + 1) + "周";
+            weekMap.merge(weekLabel, 1L, Long::sum);
+        }
+
+        List<TrendItemVo> result = new ArrayList<>();
+        weekMap.forEach((label, count) -> result.add(new TrendItemVo(label, count)));
+        return result;
+    }
+
+    @Override
+    public List<TrendItemVo> getCategoryAmountSummary() {
+        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+                .eq(BizBill::getStatus, "2");
+        if (SecurityUtils.hasPermi("*:*:*")) {
+            // 超管看全量
+        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+            wrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+        } else {
+            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+        }
+        List<BizBill> bills = this.list(wrapper);
+
+        Map<Long, Long> amountMap = new LinkedHashMap<>();
+        Map<Long, String> nameMap = new LinkedHashMap<>();
+
+        for (BizBill bill : bills) {
+            Long cid = bill.getCategoryId();
+            if (cid != null) {
+                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+                if (!nameMap.containsKey(cid)) {
+                    BizCategory cat = categoryMapper.selectById(cid);
+                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+                }
+            }
+        }
+
+        return amountMap.entrySet().stream()
+                .map(e -> new TrendItemVo(nameMap.getOrDefault(e.getKey(), "未知"), e.getValue()))
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public ReviewerStatsVo getReviewerStats() {
+        String username = SecurityUtils.getUsername();
+        ReviewerStatsVo vo = new ReviewerStatsVo();
+
+        // 待审核数量
+        vo.setPendingCount((int) this.count(
+                new LambdaQueryWrapper<BizBill>().eq(BizBill::getStatus, "1")));
+
+        // 今日通过/退回
+        String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+        int todayApproved = (int) this.count(
+                new LambdaQueryWrapper<BizBill>()
+                        .eq(BizBill::getAuditBy, username)
+                        .eq(BizBill::getStatus, "2")
+                        .ge(BizBill::getAuditTime, today));
+        int todayRejected = (int) this.count(
+                new LambdaQueryWrapper<BizBill>()
+                        .eq(BizBill::getAuditBy, username)
+                        .eq(BizBill::getStatus, "3")
+                        .ge(BizBill::getAuditTime, today));
+        vo.setTodayApproved(todayApproved);
+        vo.setTodayRejected(todayRejected);
+
+        // 通过率
+        int totalReviewed = todayApproved + todayRejected;
+        vo.setApprovalRate(totalReviewed > 0
+                ? Math.round(todayApproved * 100.0 / totalReviewed) : 0);
+
+        // 积压预警: 超过3天未审核
+        Calendar cal = Calendar.getInstance();
+        cal.add(Calendar.DAY_OF_MONTH, -3);
+        vo.setStalePending((int) this.count(
+                new LambdaQueryWrapper<BizBill>()
+                        .eq(BizBill::getStatus, "1")
+                        .lt(BizBill::getCreateTime, cal.getTime())));
+
+        // 最近审核记录
+        List<BizBill> recentBills = this.list(
+                new LambdaQueryWrapper<BizBill>()
+                        .eq(BizBill::getAuditBy, username)
+                        .in(BizBill::getStatus, "2", "3")
+                        .orderByDesc(BizBill::getAuditTime)
+                        .last("LIMIT 5"));
+        Map<Long, String> categoryNameMap = buildCategoryNameMap(recentBills);
+        vo.setRecentReviews(recentBills.stream().map(bill -> {
+            BizBillVo billVo = new BizBillVo();
+            BeanUtils.copyProperties(bill, billVo);
+            if (bill.getCategoryId() != null) {
+                billVo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+            }
+            return billVo;
+        }).collect(Collectors.toList()));
+
+        return vo;
+    }
+
+    @Override
+    public UserBillStatsVo getUserBillStats() {
+        String username = SecurityUtils.getUsername();
+
+        // 查询当前用户的所有票据
+        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+                .eq(BizBill::getCreateBy, username);
+        List<BizBill> allBills = this.list(wrapper);
+
+        // 统计各状态数量
+        long draftCount = allBills.stream().filter(b -> "0".equals(b.getStatus())).count();
+        long submittedCount = allBills.stream().filter(b -> "1".equals(b.getStatus())).count();
+        long approvedCount = allBills.stream().filter(b -> "2".equals(b.getStatus())).count();
+        long rejectedCount = allBills.stream().filter(b -> "3".equals(b.getStatus())).count();
+
+        // 计算已通过票据的总金额
+        java.math.BigDecimal totalAmount = allBills.stream()
+                .filter(b -> "2".equals(b.getStatus()))
+                .map(BizBill::getAmount)
+                .filter(amount -> amount != null)
+                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+
+        return UserBillStatsVo.builder()
+                .totalCount((long) allBills.size())
+                .draftCount(draftCount)
+                .submittedCount(submittedCount)
+                .approvedCount(approvedCount)
+                .rejectedCount(rejectedCount)
+                .totalAmount(totalAmount.setScale(2, java.math.RoundingMode.HALF_UP).toString())
+                .build();
+    }
+
+}
+//package com.zsc.module.service.impl;
+//
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+//import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+//import com.zsc.common.utils.SecurityUtils;
+//import com.zsc.module.common.exception.ServiceException;
+//import com.zsc.module.common.pagination.PageResult;
+//import com.zsc.module.domain.dto.BizBillDto;
+//import com.zsc.module.domain.dto.BizBillReviewDto;
+//import com.zsc.module.domain.dto.query.BizBillQueryDto;
+//import com.zsc.module.domain.entity.BizAuditLog;
+//import com.zsc.module.domain.entity.BizBill;
+//import com.zsc.module.domain.entity.BizBillFile;
+//import com.zsc.module.domain.entity.BizCategory;
+//import com.zsc.module.domain.vo.BizAuditLogVo;
+//import com.zsc.module.domain.vo.BizBillDetailVo;
+//import com.zsc.module.domain.vo.BizBillFileVo;
+//import com.zsc.module.domain.vo.BizBillVo;
+//import com.zsc.module.domain.vo.ReviewerStatsVo;
+//import com.zsc.module.domain.vo.TrendItemVo;
+//import com.zsc.module.domain.vo.UserBillStatsVo;
+//import com.zsc.module.mapper.BizAuditLogMapper;
+//import com.zsc.module.mapper.BizBillFileMapper;
+//import com.zsc.module.mapper.BizBillMapper;
+//import com.zsc.module.mapper.BizCategoryMapper;
+//import com.zsc.module.service.BizBillService;
+//import org.apache.commons.lang3.StringUtils;
+//import org.springframework.beans.BeanUtils;
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//
+//import java.text.SimpleDateFormat;
+//import java.util.Calendar;
+//import java.util.ArrayList;
+//import java.util.Date;
+//import java.util.LinkedHashMap;
+//import java.util.List;
+//import java.util.Map;
+//import java.util.stream.Collectors;
+//
+///**
+// * 票据表 服务实现类
+// */
+//@Service
+//@Transactional
+//public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> implements BizBillService {
+//
+//    @Autowired
+//    private BizBillFileMapper fileMapper;
+//
+//    @Autowired
+//    private BizAuditLogMapper auditLogMapper;
+//
+//    @Autowired
+//    private BizCategoryMapper categoryMapper;
+//
+//    /**
+//     * 管理员禁止执行用户专属操作
+//     */
+//    private void checkNotAdmin() {
+//        if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            throw new ServiceException("管理员不能执行用户操作！");
+//        }
+//    }
+//
+//    // ==================== 新增 ====================
+//
+//    @Override
+//    public void addBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = new BizBill();
+//        BeanUtils.copyProperties(dto, bill);
+//
+//        bill.setCreateBy(SecurityUtils.getUsername());
+//        bill.setCreateTime(new Date());
+//
+//        // 先保存草稿（用临时编号占位），再根据状态替换为正式编号
+//        bill.setBillNo("DRAFT-" + System.currentTimeMillis());
+//
+//        if (!this.save(bill)) {
+//            throw new ServiceException("系统错误，票据保存失败！");
+//        }
+//
+//        if ("1".equals(dto.getStatus())) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//            this.updateById(bill);
+//        }
+//
+//        // 保存附件记录
+//        saveAttachments(bill.getId(), dto.getAttachment());
+//    }
+//
+//    // ==================== 查询列表 ====================
+//
+//    @Override
+//    public PageResult<BizBillVo> queryBills(BizBillQueryDto dto) {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<>();
+//
+//        // 普通用户只查自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//
+//        // 条件过滤
+//        if (StringUtils.isNotBlank(dto.getKeywords())) {
+//            wrapper.and(w -> w
+//                    .like(BizBill::getTitle, dto.getKeywords())
+//                    .or()
+//                    .like(BizBill::getBillNo, dto.getKeywords())
+//            );
+//        }
+//        wrapper.eq(dto.getCategoryId() != null, BizBill::getCategoryId, dto.getCategoryId())
+//                .eq(StringUtils.isNotBlank(dto.getStatus()), BizBill::getStatus, dto.getStatus())
+//                .like(StringUtils.isNotBlank(dto.getAuditBy()), BizBill::getAuditBy, dto.getAuditBy())
+//                .like(StringUtils.isNotBlank(dto.getCreateBy()), BizBill::getCreateBy, dto.getCreateBy())
+//                .ge(dto.getMinAmount() != null, BizBill::getAmount, dto.getMinAmount())
+//                .le(dto.getMaxAmount() != null, BizBill::getAmount, dto.getMaxAmount())
+//                .ge(StringUtils.isNotBlank(dto.getStartTime()), BizBill::getCreateTime, dto.getStartTime())
+//                .le(StringUtils.isNotBlank(dto.getEndTime()), BizBill::getCreateTime, dto.getEndTime())
+//                .last(buildOrderSql(dto.getSortField(), dto.getSortOrder()));
+//
+//        Page<BizBill> page = this.page(dto.convertToPage(), wrapper);
+//
+//        // 批量查类别名称
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(page.getRecords());
+//
+//        // Entity → VO
+//        List<BizBillVo> voList = page.getRecords().stream().map(bill -> {
+//            BizBillVo vo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, vo);
+//            if (bill.getCategoryId() != null) {
+//                vo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return vo;
+//        }).collect(Collectors.toList());
+//
+//        PageResult result = PageResult.fromPage(page);
+//        result.setList(voList);
+//        return result;
+//    }
+//
+//    // ==================== 详情 ====================
+//
+//    @Override
+//    public BizBillDetailVo getBillDetail(Long id) {
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 非管理员只能查看自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")
+//                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能查看自己的票据！");
+//        }
+//
+//        BizBillDetailVo vo = new BizBillDetailVo();
+//        BeanUtils.copyProperties(bill, vo);
+//
+//        // 设置状态文本
+//        vo.setStatusText(getStatusText(bill.getStatus()));
+//
+//        // 查类别名称
+//        if (bill.getCategoryId() != null) {
+//            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//            if (category != null) {
+//                vo.setCategoryName(category.getCategoryName());
+//            }
+//        }
+//
+//        // 查附件列表
+//        List<BizBillFile> files = fileMapper.selectList(
+//                new LambdaQueryWrapper<BizBillFile>()
+//                        .eq(BizBillFile::getBillId, id)
+//                        .orderByAsc(BizBillFile::getSortOrder)
+//        );
+//        vo.setFiles(files.stream().map(f -> {
+//            BizBillFileVo fvo = new BizBillFileVo();
+//            BeanUtils.copyProperties(f, fvo);
+//            // 生成预览和下载URL
+//            fvo.setPreviewUrl("/api/bill/preview/" + f.getId());
+//            fvo.setDownloadUrl("/api/bill/download/" + f.getId());
+//            return fvo;
+//        }).collect(Collectors.toList()));
+//
+//        // 查审核历史
+//        List<BizAuditLog> logs = auditLogMapper.selectList(
+//                new LambdaQueryWrapper<BizAuditLog>()
+//                        .eq(BizAuditLog::getBillId, id)
+//                        .orderByDesc(BizAuditLog::getAuditTime)
+//        );
+//        vo.setAuditLogs(logs.stream().map(l -> {
+//            BizAuditLogVo lvo = new BizAuditLogVo();
+//            BeanUtils.copyProperties(l, lvo);
+//            // 设置操作文本
+//            lvo.setActionText("1".equals(l.getAction()) ? "通过" : "退回");
+//            return lvo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    // ==================== 编辑 ====================
+//
+//    @Override
+//    public void updateBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(dto.getId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可编辑
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能编辑草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能编辑自己的票据！");
+//        }
+//
+//        // 保留字段不被 null 覆盖
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            bill.setAttachment(dto.getAttachment());
+//        }
+//
+//        bill.setTitle(dto.getTitle());
+//        bill.setCategoryId(dto.getCategoryId());
+//        bill.setAmount(dto.getAmount());
+//        bill.setDescription(dto.getDescription());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据更新失败！");
+//        }
+//
+//        // 仅当传入了新附件时才替换旧附件
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                    .eq(BizBillFile::getBillId, bill.getId()));
+//            saveAttachments(bill.getId(), dto.getAttachment());
+//        }
+//    }
+//
+//    // ==================== 提交审核 ====================
+//
+//    @Override
+//    public void submitBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可提交
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能提交草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能提交自己的票据！");
+//        }
+//
+//        // 草稿有临时编号的，替换为正式编号（用主键ID保证并发唯一）
+//        if (StringUtils.isBlank(bill.getBillNo()) || bill.getBillNo().startsWith("DRAFT-")) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//        }
+//
+//        bill.setStatus("1");
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据提交失败！");
+//        }
+//    }
+//
+//    // ==================== 删除 ====================
+//
+//    @Override
+//    public void deleteBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿可删除
+//        if (!"0".equals(bill.getStatus())) {
+//            throw new ServiceException("只能删除草稿状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能删除自己的票据！");
+//        }
+//
+//        // 先删附件，再删票据
+//        fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                .eq(BizBillFile::getBillId, id));
+//        this.removeById(id);
+//    }
+//
+//    // ==================== 审核 ====================
+//
+//    @Override
+//    public void reviewBill(BizBillReviewDto dto) {
+//        // 校验 action 值合法性
+//        if (!List.of("1", "2").contains(dto.getAction())) {
+//            throw new ServiceException("无效的审核结果，action 必须为 1（通过）或 2（退回）！");
+//        }
+//
+//        BizBill bill = this.getById(dto.getBillId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅已提交状态可审核
+//        if (!"1".equals(bill.getStatus())) {
+//            throw new ServiceException("只能审核已提交状态的票据！");
+//        }
+//
+//        // 更新票据审核信息
+//        bill.setStatus(dto.getAction().equals("1") ? "2" : "3");
+//        bill.setAuditBy(SecurityUtils.getUsername());
+//        bill.setAuditTime(new Date());
+//        bill.setAuditComment(dto.getComment());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，审核失败！");
+//        }
+//
+//        // 记录审核历史
+//        BizAuditLog log = BizAuditLog.builder()
+//                .billId(dto.getBillId())
+//                .action(dto.getAction())
+//                .comment(dto.getComment())
+//                .auditBy(SecurityUtils.getUsername())
+//                .auditTime(new Date())
+//                .build();
+//        auditLogMapper.insert(log);
+//    }
+//
+//    // ==================== 附件 ====================
+//
+//    /**
+//     * 解析附件路径字符串，创建附件记录
+//     * @param billId 票据ID
+//     * @param attachment 逗号分隔的附件路径
+//     */
+//    private void saveAttachments(Long billId, String attachment) {
+//        if (StringUtils.isBlank(attachment)) {
+//            return;
+//        }
+//
+//        String[] paths = attachment.split(",");
+//        for (int i = 0; i < paths.length; i++) {
+//            String path = paths[i].trim();
+//            if (StringUtils.isBlank(path)) {
+//                continue;
+//            }
+//
+//            BizBillFile file = BizBillFile.builder()
+//                    .billId(billId)
+//                    .fileName(path.substring(path.lastIndexOf("/") + 1))
+//                    .filePath(path)
+//                    .sortOrder(i)
+//                    .createBy(SecurityUtils.getUsername())
+//                    .createTime(new Date())
+//                    .build();
+//            fileMapper.insert(file);
+//        }
+//    }
+//
+//    // ==================== 工具方法 ====================
+//
+//    /**
+//     * 批量查询类别ID对应的类别名称
+//     */
+//    private String buildOrderSql(String sortField, String sortOrder) {
+//        if (sortField == null || sortField.isEmpty()) return "ORDER BY create_time DESC";
+//        String col = switch (sortField) {
+//            case "amount" -> "amount";
+//            case "createTime" -> "create_time";
+//            case "auditTime" -> "audit_time";
+//            default -> "create_time";
+//        };
+//        String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+//        return "ORDER BY " + col + " " + dir;
+//    }
+//
+//    private Map<Long, String> buildCategoryNameMap(List<BizBill> bills) {
+//        List<Long> categoryIds = bills.stream()
+//                .map(BizBill::getCategoryId)
+//                .filter(id -> id != null)
+//                .distinct()
+//                .collect(Collectors.toList());
+//
+//        if (categoryIds.isEmpty()) {
+//            return new java.util.HashMap<>();
+//        }
+//
+//        List<BizCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+//        return categories.stream()
+//                .collect(Collectors.toMap(BizCategory::getCategoryId, BizCategory::getCategoryName, (a, b) -> a, java.util.HashMap::new));
+//    }
+//
+//    /**
+//     * 生成票据编号: BILL-yyyyMMdd-{billId}
+//     * 使用票据主键ID保证并发安全，避免批量提交时编号重复
+//     */
+//    private String generateBillNo(Long billId) {
+//        String dateStr = new SimpleDateFormat("yyyyMMdd").format(new Date());
+//        return String.format("BILL-%s-%04d", dateStr, billId);
+//    }
+//
+//    /**
+//     * 获取状态文本
+//     */
+//    private String getStatusText(String status) {
+//        if (status == null) return "未知";
+//        switch (status) {
+//            case "0": return "草稿";
+//            case "1": return "已提交";
+//            case "2": return "已通过";
+//            case "3": return "已退回";
+//            default: return "未知";
+//        }
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getMonthlyTrend() {
+//        Calendar now = Calendar.getInstance();
+//        int year = now.get(Calendar.YEAR);
+//        int month = now.get(Calendar.MONTH) + 1;
+//
+//        Calendar start = Calendar.getInstance();
+//        start.set(year, month - 1, 1, 0, 0, 0);
+//        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+//        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+//
+//        LambdaQueryWrapper<BizBill> trendWrapper = new LambdaQueryWrapper<BizBill>()
+//                .ge(BizBill::getUpdateTime, startStr)
+//                .le(BizBill::getUpdateTime, endStr)
+//                .ne(BizBill::getStatus, "0");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            trendWrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            trendWrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(trendWrapper);
+//
+//        Map<String, Long> weekMap = new LinkedHashMap<>();
+//        for (int i = 1; i <= 4; i++) {
+//            weekMap.put("第" + i + "周", 0L);
+//        }
+//
+//        for (BizBill bill : bills) {
+//            Calendar cal = Calendar.getInstance();
+//            cal.setTime(bill.getUpdateTime());
+//            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+//            String weekLabel = "第" + ((dayOfMonth - 1) / 7 + 1) + "周";
+//            weekMap.merge(weekLabel, 1L, Long::sum);
+//        }
+//
+//        List<TrendItemVo> result = new ArrayList<>();
+//        weekMap.forEach((label, count) -> result.add(new TrendItemVo(label, count)));
+//        return result;
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getCategoryAmountSummary() {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getStatus, "2");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(wrapper);
+//
+//        Map<Long, Long> amountMap = new LinkedHashMap<>();
+//        Map<Long, String> nameMap = new LinkedHashMap<>();
+//
+//        for (BizBill bill : bills) {
+//            Long cid = bill.getCategoryId();
+//            if (cid != null) {
+//                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+//                if (!nameMap.containsKey(cid)) {
+//                    BizCategory cat = categoryMapper.selectById(cid);
+//                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+//                }
+//            }
+//        }
+//
+//        return amountMap.entrySet().stream()
+//                .map(e -> new TrendItemVo(nameMap.getOrDefault(e.getKey(), "未知"), e.getValue()))
+//                .collect(Collectors.toList());
+//    }
+//
+//    @Override
+//    public ReviewerStatsVo getReviewerStats() {
+//        String username = SecurityUtils.getUsername();
+//        ReviewerStatsVo vo = new ReviewerStatsVo();
+//
+//        // 待审核数量
+//        vo.setPendingCount((int) this.count(
+//                new LambdaQueryWrapper<BizBill>().eq(BizBill::getStatus, "1")));
+//
+//        // 今日通过/退回
+//        String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+//        int todayApproved = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "2")
+//                        .ge(BizBill::getAuditTime, today));
+//        int todayRejected = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "3")
+//                        .ge(BizBill::getAuditTime, today));
+//        vo.setTodayApproved(todayApproved);
+//        vo.setTodayRejected(todayRejected);
+//
+//        // 通过率
+//        int totalReviewed = todayApproved + todayRejected;
+//        vo.setApprovalRate(totalReviewed > 0
+//                ? Math.round(todayApproved * 100.0 / totalReviewed) : 0);
+//
+//        // 积压预警: 超过3天未审核
+//        Calendar cal = Calendar.getInstance();
+//        cal.add(Calendar.DAY_OF_MONTH, -3);
+//        vo.setStalePending((int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getStatus, "1")
+//                        .lt(BizBill::getCreateTime, cal.getTime())));
+//
+//        // 最近审核记录
+//        List<BizBill> recentBills = this.list(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .in(BizBill::getStatus, "2", "3")
+//                        .orderByDesc(BizBill::getAuditTime)
+//                        .last("LIMIT 5"));
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(recentBills);
+//        vo.setRecentReviews(recentBills.stream().map(bill -> {
+//            BizBillVo billVo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, billVo);
+//            if (bill.getCategoryId() != null) {
+//                billVo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return billVo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    @Override
+//    public UserBillStatsVo getUserBillStats() {
+//        String username = SecurityUtils.getUsername();
+//
+//        // 查询当前用户的所有票据
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getCreateBy, username);
+//        List<BizBill> allBills = this.list(wrapper);
+//
+//        // 统计各状态数量
+//        long draftCount = allBills.stream().filter(b -> "0".equals(b.getStatus())).count();
+//        long submittedCount = allBills.stream().filter(b -> "1".equals(b.getStatus())).count();
+//        long approvedCount = allBills.stream().filter(b -> "2".equals(b.getStatus())).count();
+//        long rejectedCount = allBills.stream().filter(b -> "3".equals(b.getStatus())).count();
+//
+//        // 计算已通过票据的总金额
+//        java.math.BigDecimal totalAmount = allBills.stream()
+//                .filter(b -> "2".equals(b.getStatus()))
+//                .map(BizBill::getAmount)
+//                .filter(amount -> amount != null)
+//                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+//
+//        return UserBillStatsVo.builder()
+//                .totalCount((long) allBills.size())
+//                .draftCount(draftCount)
+//                .submittedCount(submittedCount)
+//                .approvedCount(approvedCount)
+//                .rejectedCount(rejectedCount)
+//                .totalAmount(totalAmount.setScale(2, java.math.RoundingMode.HALF_UP).toString())
+//                .build();
+//    }
+//
+//}
+//package com.zsc.module.service.impl;
+//
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+//import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+//import com.zsc.common.utils.SecurityUtils;
+//import com.zsc.module.common.exception.ServiceException;
+//import com.zsc.module.common.pagination.PageResult;
+//import com.zsc.module.domain.dto.BizBillDto;
+//import com.zsc.module.domain.dto.BizBillReviewDto;
+//import com.zsc.module.domain.dto.query.BizBillQueryDto;
+//import com.zsc.module.domain.entity.BizAuditLog;
+//import com.zsc.module.domain.entity.BizBill;
+//import com.zsc.module.domain.entity.BizBillFile;
+//import com.zsc.module.domain.entity.BizCategory;
+//import com.zsc.module.domain.vo.BizAuditLogVo;
+//import com.zsc.module.domain.vo.BizBillDetailVo;
+//import com.zsc.module.domain.vo.BizBillFileVo;
+//import com.zsc.module.domain.vo.BizBillVo;
+//import com.zsc.module.domain.vo.ReviewerStatsVo;
+//import com.zsc.module.domain.vo.TrendItemVo;
+//import com.zsc.module.domain.vo.UserBillStatsVo;
+//import com.zsc.module.mapper.BizAuditLogMapper;
+//import com.zsc.module.mapper.BizBillFileMapper;
+//import com.zsc.module.mapper.BizBillMapper;
+//import com.zsc.module.mapper.BizCategoryMapper;
+//import com.zsc.module.service.BizBillService;
+//import org.apache.commons.lang3.StringUtils;
+//import org.springframework.beans.BeanUtils;
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//
+//import java.text.SimpleDateFormat;
+//import java.util.Calendar;
+//import java.util.ArrayList;
+//import java.util.Date;
+//import java.util.LinkedHashMap;
+//import java.util.List;
+//import java.util.Map;
+//import java.util.stream.Collectors;
+//
+///**
+// * 票据表 服务实现类
+// */
+//@Service
+//@Transactional
+//public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> implements BizBillService {
+//
+//    @Autowired
+//    private BizBillFileMapper fileMapper;
+//
+//    @Autowired
+//    private BizAuditLogMapper auditLogMapper;
+//
+//    @Autowired
+//    private BizCategoryMapper categoryMapper;
+//
+//    /**
+//     * 管理员禁止执行用户专属操作
+//     */
+//    private void checkNotAdmin() {
+//        if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            throw new ServiceException("管理员不能执行用户操作！");
+//        }
+//    }
+//
+//    // ==================== 新增 ====================
+//
+//    @Override
+//    public void addBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = new BizBill();
+//        BeanUtils.copyProperties(dto, bill);
+//
+//        bill.setCreateBy(SecurityUtils.getUsername());
+//        bill.setCreateTime(new Date());
+//
+//        // 先保存草稿（用临时编号占位），再根据状态替换为正式编号
+//        bill.setBillNo("DRAFT-" + System.currentTimeMillis());
+//
+//        if (!this.save(bill)) {
+//            throw new ServiceException("系统错误，票据保存失败！");
+//        }
+//
+//        if ("1".equals(dto.getStatus())) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//            this.updateById(bill);
+//        }
+//
+//        // 保存附件记录
+//        saveAttachments(bill.getId(), dto.getAttachment());
+//    }
+//
+//    // ==================== 查询列表 ====================
+//
+//    @Override
+//    public PageResult<BizBillVo> queryBills(BizBillQueryDto dto) {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<>();
+//
+//        // 普通用户只查自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//
+//        // 条件过滤
+//        if (StringUtils.isNotBlank(dto.getKeywords())) {
+//            wrapper.and(w -> w
+//                    .like(BizBill::getTitle, dto.getKeywords())
+//                    .or()
+//                    .like(BizBill::getBillNo, dto.getKeywords())
+//            );
+//        }
+//        wrapper.eq(dto.getCategoryId() != null, BizBill::getCategoryId, dto.getCategoryId())
+//                .eq(StringUtils.isNotBlank(dto.getStatus()), BizBill::getStatus, dto.getStatus())
+//                .like(StringUtils.isNotBlank(dto.getAuditBy()), BizBill::getAuditBy, dto.getAuditBy())
+//                .like(StringUtils.isNotBlank(dto.getCreateBy()), BizBill::getCreateBy, dto.getCreateBy())
+//                .ge(dto.getMinAmount() != null, BizBill::getAmount, dto.getMinAmount())
+//                .le(dto.getMaxAmount() != null, BizBill::getAmount, dto.getMaxAmount())
+//                .ge(StringUtils.isNotBlank(dto.getStartTime()), BizBill::getCreateTime, dto.getStartTime())
+//                .le(StringUtils.isNotBlank(dto.getEndTime()), BizBill::getCreateTime, dto.getEndTime())
+//                .last(buildOrderSql(dto.getSortField(), dto.getSortOrder()));
+//
+//        Page<BizBill> page = this.page(dto.convertToPage(), wrapper);
+//
+//        // 批量查类别名称
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(page.getRecords());
+//
+//        // Entity → VO
+//        List<BizBillVo> voList = page.getRecords().stream().map(bill -> {
+//            BizBillVo vo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, vo);
+//            if (bill.getCategoryId() != null) {
+//                vo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return vo;
+//        }).collect(Collectors.toList());
+//
+//        PageResult result = PageResult.fromPage(page);
+//        result.setList(voList);
+//        return result;
+//    }
+//
+//    // ==================== 详情 ====================
+//
+//    @Override
+//    public BizBillDetailVo getBillDetail(Long id) {
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 非管理员只能查看自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")
+//                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能查看自己的票据！");
+//        }
+//
+//        BizBillDetailVo vo = new BizBillDetailVo();
+//        BeanUtils.copyProperties(bill, vo);
+//
+//        // 设置状态文本
+//        vo.setStatusText(getStatusText(bill.getStatus()));
+//
+//        // 查类别名称
+//        if (bill.getCategoryId() != null) {
+//            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//            if (category != null) {
+//                vo.setCategoryName(category.getCategoryName());
+//            }
+//        }
+//
+//        // 查附件列表
+//        List<BizBillFile> files = fileMapper.selectList(
+//                new LambdaQueryWrapper<BizBillFile>()
+//                        .eq(BizBillFile::getBillId, id)
+//                        .orderByAsc(BizBillFile::getSortOrder)
+//        );
+//        vo.setFiles(files.stream().map(f -> {
+//            BizBillFileVo fvo = new BizBillFileVo();
+//            BeanUtils.copyProperties(f, fvo);
+//            // 生成预览和下载URL
+//            fvo.setPreviewUrl("/api/bill/preview/" + f.getId());
+//            fvo.setDownloadUrl("/api/bill/download/" + f.getId());
+//            return fvo;
+//        }).collect(Collectors.toList()));
+//
+//        // 查审核历史
+//        List<BizAuditLog> logs = auditLogMapper.selectList(
+//                new LambdaQueryWrapper<BizAuditLog>()
+//                        .eq(BizAuditLog::getBillId, id)
+//                        .orderByDesc(BizAuditLog::getAuditTime)
+//        );
+//        vo.setAuditLogs(logs.stream().map(l -> {
+//            BizAuditLogVo lvo = new BizAuditLogVo();
+//            BeanUtils.copyProperties(l, lvo);
+//            // 设置操作文本
+//            lvo.setActionText("1".equals(l.getAction()) ? "通过" : "退回");
+//            return lvo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    // ==================== 编辑 ====================
+//
+//    @Override
+//    public void updateBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(dto.getId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可编辑
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能编辑草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能编辑自己的票据！");
+//        }
+//
+//        // 保留字段不被 null 覆盖
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            bill.setAttachment(dto.getAttachment());
+//        }
+//
+//        bill.setTitle(dto.getTitle());
+//        bill.setCategoryId(dto.getCategoryId());
+//        bill.setAmount(dto.getAmount());
+//        bill.setDescription(dto.getDescription());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据更新失败！");
+//        }
+//
+//        // 仅当传入了新附件时才替换旧附件
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                    .eq(BizBillFile::getBillId, bill.getId()));
+//            saveAttachments(bill.getId(), dto.getAttachment());
+//        }
+//    }
+//
+//    // ==================== 提交审核 ====================
+//
+//    @Override
+//    public void submitBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可提交
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能提交草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能提交自己的票据！");
+//        }
+//
+//        // 草稿有临时编号的，替换为正式编号（用主键ID保证并发唯一）
+//        if (StringUtils.isBlank(bill.getBillNo()) || bill.getBillNo().startsWith("DRAFT-")) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//        }
+//
+//        bill.setStatus("1");
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据提交失败！");
+//        }
+//    }
+//
+//    // ==================== 删除 ====================
+//
+//    @Override
+//    public void deleteBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿可删除
+//        if (!"0".equals(bill.getStatus())) {
+//            throw new ServiceException("只能删除草稿状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能删除自己的票据！");
+//        }
+//
+//        // 先删附件，再删票据
+//        fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                .eq(BizBillFile::getBillId, id));
+//        this.removeById(id);
+//    }
+//
+//    // ==================== 审核 ====================
+//
+//    @Override
+//    public void reviewBill(BizBillReviewDto dto) {
+//        // 校验 action 值合法性
+//        if (!List.of("1", "2").contains(dto.getAction())) {
+//            throw new ServiceException("无效的审核结果，action 必须为 1（通过）或 2（退回）！");
+//        }
+//
+//        BizBill bill = this.getById(dto.getBillId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅已提交状态可审核
+//        if (!"1".equals(bill.getStatus())) {
+//            throw new ServiceException("只能审核已提交状态的票据！");
+//        }
+//
+//        // 更新票据审核信息
+//        bill.setStatus(dto.getAction().equals("1") ? "2" : "3");
+//        bill.setAuditBy(SecurityUtils.getUsername());
+//        bill.setAuditTime(new Date());
+//        bill.setAuditComment(dto.getComment());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，审核失败！");
+//        }
+//
+//        // 记录审核历史
+//        BizAuditLog log = BizAuditLog.builder()
+//                .billId(dto.getBillId())
+//                .action(dto.getAction())
+//                .comment(dto.getComment())
+//                .auditBy(SecurityUtils.getUsername())
+//                .auditTime(new Date())
+//                .build();
+//        auditLogMapper.insert(log);
+//    }
+//
+//    // ==================== 附件 ====================
+//
+//    /**
+//     * 解析附件路径字符串，创建附件记录
+//     * @param billId 票据ID
+//     * @param attachment 逗号分隔的附件路径
+//     */
+//    private void saveAttachments(Long billId, String attachment) {
+//        if (StringUtils.isBlank(attachment)) {
+//            return;
+//        }
+//
+//        String[] paths = attachment.split(",");
+//        for (int i = 0; i < paths.length; i++) {
+//            String path = paths[i].trim();
+//            if (StringUtils.isBlank(path)) {
+//                continue;
+//            }
+//
+//            BizBillFile file = BizBillFile.builder()
+//                    .billId(billId)
+//                    .fileName(path.substring(path.lastIndexOf("/") + 1))
+//                    .filePath(path)
+//                    .sortOrder(i)
+//                    .createBy(SecurityUtils.getUsername())
+//                    .createTime(new Date())
+//                    .build();
+//            fileMapper.insert(file);
+//        }
+//    }
+//
+//    // ==================== 工具方法 ====================
+//
+//    /**
+//     * 批量查询类别ID对应的类别名称
+//     */
+//    private String buildOrderSql(String sortField, String sortOrder) {
+//        if (sortField == null || sortField.isEmpty()) return "ORDER BY create_time DESC";
+//        String col = switch (sortField) {
+//            case "amount" -> "amount";
+//            case "createTime" -> "create_time";
+//            case "auditTime" -> "audit_time";
+//            default -> "create_time";
+//        };
+//        String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+//        return "ORDER BY " + col + " " + dir;
+//    }
+//
+//    private Map<Long, String> buildCategoryNameMap(List<BizBill> bills) {
+//        List<Long> categoryIds = bills.stream()
+//                .map(BizBill::getCategoryId)
+//                .filter(id -> id != null)
+//                .distinct()
+//                .collect(Collectors.toList());
+//
+//        if (categoryIds.isEmpty()) {
+//            return new java.util.HashMap<>();
+//        }
+//
+//        List<BizCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+//        return categories.stream()
+//                .collect(Collectors.toMap(BizCategory::getCategoryId, BizCategory::getCategoryName, (a, b) -> a, java.util.HashMap::new));
+//    }
+//
+//    /**
+//     * 生成票据编号: BILL-yyyyMMdd-{billId}
+//     * 使用票据主键ID保证并发安全，避免批量提交时编号重复
+//     */
+//    private String generateBillNo(Long billId) {
+//        String dateStr = new SimpleDateFormat("yyyyMMdd").format(new Date());
+//        return String.format("BILL-%s-%04d", dateStr, billId);
+//    }
+//
+//    /**
+//     * 获取状态文本
+//     */
+//    private String getStatusText(String status) {
+//        if (status == null) return "未知";
+//        switch (status) {
+//            case "0": return "草稿";
+//            case "1": return "已提交";
+//            case "2": return "已通过";
+//            case "3": return "已退回";
+//            default: return "未知";
+//        }
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getMonthlyTrend() {
+//        Calendar now = Calendar.getInstance();
+//        int year = now.get(Calendar.YEAR);
+//        int month = now.get(Calendar.MONTH) + 1;
+//
+//        Calendar start = Calendar.getInstance();
+//        start.set(year, month - 1, 1, 0, 0, 0);
+//        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+//        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+//
+//        LambdaQueryWrapper<BizBill> trendWrapper = new LambdaQueryWrapper<BizBill>()
+//                .ge(BizBill::getUpdateTime, startStr)
+//                .le(BizBill::getUpdateTime, endStr)
+//                .ne(BizBill::getStatus, "0");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            trendWrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            trendWrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(trendWrapper);
+//
+//        Map<String, Long> weekMap = new LinkedHashMap<>();
+//        for (int i = 1; i <= 4; i++) {
+//            weekMap.put("第" + i + "周", 0L);
+//        }
+//
+//        for (BizBill bill : bills) {
+//            Calendar cal = Calendar.getInstance();
+//            cal.setTime(bill.getUpdateTime());
+//            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+//            String weekLabel = "第" + ((dayOfMonth - 1) / 7 + 1) + "周";
+//            weekMap.merge(weekLabel, 1L, Long::sum);
+//        }
+//
+//        List<TrendItemVo> result = new ArrayList<>();
+//        weekMap.forEach((label, count) -> result.add(new TrendItemVo(label, count)));
+//        return result;
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getCategoryAmountSummary() {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getStatus, "2");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(wrapper);
+//
+//        Map<Long, Long> amountMap = new LinkedHashMap<>();
+//        Map<Long, String> nameMap = new LinkedHashMap<>();
+//
+//        for (BizBill bill : bills) {
+//            Long cid = bill.getCategoryId();
+//            if (cid != null) {
+//                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+//                if (!nameMap.containsKey(cid)) {
+//                    BizCategory cat = categoryMapper.selectById(cid);
+//                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+//                }
+//            }
+//        }
+//
+//        return amountMap.entrySet().stream()
+//                .map(e -> new TrendItemVo(nameMap.getOrDefault(e.getKey(), "未知"), e.getValue()))
+//                .collect(Collectors.toList());
+//    }
+//
+//    @Override
+//    public ReviewerStatsVo getReviewerStats() {
+//        String username = SecurityUtils.getUsername();
+//        ReviewerStatsVo vo = new ReviewerStatsVo();
+//
+//        // 待审核数量
+//        vo.setPendingCount((int) this.count(
+//                new LambdaQueryWrapper<BizBill>().eq(BizBill::getStatus, "1")));
+//
+//        // 今日通过/退回
+//        String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+//        int todayApproved = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "2")
+//                        .ge(BizBill::getAuditTime, today));
+//        int todayRejected = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "3")
+//                        .ge(BizBill::getAuditTime, today));
+//        vo.setTodayApproved(todayApproved);
+//        vo.setTodayRejected(todayRejected);
+//
+//        // 通过率
+//        int totalReviewed = todayApproved + todayRejected;
+//        vo.setApprovalRate(totalReviewed > 0
+//                ? Math.round(todayApproved * 100.0 / totalReviewed) : 0);
+//
+//        // 积压预警: 超过3天未审核
+//        Calendar cal = Calendar.getInstance();
+//        cal.add(Calendar.DAY_OF_MONTH, -3);
+//        vo.setStalePending((int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getStatus, "1")
+//                        .lt(BizBill::getCreateTime, cal.getTime())));
+//
+//        // 最近审核记录
+//        List<BizBill> recentBills = this.list(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .in(BizBill::getStatus, "2", "3")
+//                        .orderByDesc(BizBill::getAuditTime)
+//                        .last("LIMIT 5"));
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(recentBills);
+//        vo.setRecentReviews(recentBills.stream().map(bill -> {
+//            BizBillVo billVo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, billVo);
+//            if (bill.getCategoryId() != null) {
+//                billVo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return billVo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    @Override
+//    public UserBillStatsVo getUserBillStats() {
+//        String username = SecurityUtils.getUsername();
+//
+//        // 查询当前用户的所有票据
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getCreateBy, username);
+//        List<BizBill> allBills = this.list(wrapper);
+//
+//        // 统计各状态数量
+//        long draftCount = allBills.stream().filter(b -> "0".equals(b.getStatus())).count();
+//        long submittedCount = allBills.stream().filter(b -> "1".equals(b.getStatus())).count();
+//        long approvedCount = allBills.stream().filter(b -> "2".equals(b.getStatus())).count();
+//        long rejectedCount = allBills.stream().filter(b -> "3".equals(b.getStatus())).count();
+//
+//        // 计算已通过票据的总金额
+//        java.math.BigDecimal totalAmount = allBills.stream()
+//                .filter(b -> "2".equals(b.getStatus()))
+//                .map(BizBill::getAmount)
+//                .filter(amount -> amount != null)
+//                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+//
+//        return UserBillStatsVo.builder()
+//                .totalCount((long) allBills.size())
+//                .draftCount(draftCount)
+//                .submittedCount(submittedCount)
+//                .approvedCount(approvedCount)
+//                .rejectedCount(rejectedCount)
+//                .totalAmount(totalAmount.setScale(2, java.math.RoundingMode.HALF_UP).toString())
+//                .build();
+//    }
+//
+//}
+//package com.zsc.module.service.impl;
+//
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+//import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+//import com.zsc.common.utils.SecurityUtils;
+//import com.zsc.module.common.exception.ServiceException;
+//import com.zsc.module.common.pagination.PageResult;
+//import com.zsc.module.domain.dto.BizBillDto;
+//import com.zsc.module.domain.dto.BizBillReviewDto;
+//import com.zsc.module.domain.dto.query.BizBillQueryDto;
+//import com.zsc.module.domain.entity.BizAuditLog;
+//import com.zsc.module.domain.entity.BizBill;
+//import com.zsc.module.domain.entity.BizBillFile;
+//import com.zsc.module.domain.entity.BizCategory;
+//import com.zsc.module.domain.vo.BizAuditLogVo;
+//import com.zsc.module.domain.vo.BizBillDetailVo;
+//import com.zsc.module.domain.vo.BizBillFileVo;
+//import com.zsc.module.domain.vo.BizBillVo;
+//import com.zsc.module.domain.vo.ReviewerStatsVo;
+//import com.zsc.module.domain.vo.TrendItemVo;
+//import com.zsc.module.domain.vo.UserBillStatsVo;
+//import com.zsc.module.mapper.BizAuditLogMapper;
+//import com.zsc.module.mapper.BizBillFileMapper;
+//import com.zsc.module.mapper.BizBillMapper;
+//import com.zsc.module.mapper.BizCategoryMapper;
+//import com.zsc.module.service.BizBillService;
+//import org.apache.commons.lang3.StringUtils;
+//import org.springframework.beans.BeanUtils;
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//
+//import java.text.SimpleDateFormat;
+//import java.util.Calendar;
+//import java.util.ArrayList;
+//import java.util.Date;
+//import java.util.LinkedHashMap;
+//import java.util.List;
+//import java.util.Map;
+//import java.util.stream.Collectors;
+//
+///**
+// * 票据表 服务实现类
+// */
+//@Service
+//@Transactional
+//public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> implements BizBillService {
+//
+//    @Autowired
+//    private BizBillFileMapper fileMapper;
+//
+//    @Autowired
+//    private BizAuditLogMapper auditLogMapper;
+//
+//    @Autowired
+//    private BizCategoryMapper categoryMapper;
+//
+//    /**
+//     * 管理员禁止执行用户专属操作
+//     */
+//    private void checkNotAdmin() {
+//        if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            throw new ServiceException("管理员不能执行用户操作！");
+//        }
+//    }
+//
+//    // ==================== 新增 ====================
+//
+//    @Override
+//    public void addBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = new BizBill();
+//        BeanUtils.copyProperties(dto, bill);
+//
+//        bill.setCreateBy(SecurityUtils.getUsername());
+//        bill.setCreateTime(new Date());
+//
+//        // 先保存草稿（用临时编号占位），再根据状态替换为正式编号
+//        bill.setBillNo("DRAFT-" + System.currentTimeMillis());
+//
+//        if (!this.save(bill)) {
+//            throw new ServiceException("系统错误，票据保存失败！");
+//        }
+//
+//        if ("1".equals(dto.getStatus())) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//            this.updateById(bill);
+//        }
+//
+//        // 保存附件记录
+//        saveAttachments(bill.getId(), dto.getAttachment());
+//    }
+//
+//    // ==================== 查询列表 ====================
+//
+//    @Override
+//    public PageResult<BizBillVo> queryBills(BizBillQueryDto dto) {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<>();
+//
+//        // 普通用户只查自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//
+//        // 条件过滤
+//        if (StringUtils.isNotBlank(dto.getKeywords())) {
+//            wrapper.and(w -> w
+//                    .like(BizBill::getTitle, dto.getKeywords())
+//                    .or()
+//                    .like(BizBill::getBillNo, dto.getKeywords())
+//            );
+//        }
+//        wrapper.eq(dto.getCategoryId() != null, BizBill::getCategoryId, dto.getCategoryId())
+//                .eq(StringUtils.isNotBlank(dto.getStatus()), BizBill::getStatus, dto.getStatus())
+//                .like(StringUtils.isNotBlank(dto.getAuditBy()), BizBill::getAuditBy, dto.getAuditBy())
+//                .like(StringUtils.isNotBlank(dto.getCreateBy()), BizBill::getCreateBy, dto.getCreateBy())
+//                .ge(dto.getMinAmount() != null, BizBill::getAmount, dto.getMinAmount())
+//                .le(dto.getMaxAmount() != null, BizBill::getAmount, dto.getMaxAmount())
+//                .ge(StringUtils.isNotBlank(dto.getStartTime()), BizBill::getCreateTime, dto.getStartTime())
+//                .le(StringUtils.isNotBlank(dto.getEndTime()), BizBill::getCreateTime, dto.getEndTime())
+//                .last(buildOrderSql(dto.getSortField(), dto.getSortOrder()));
+//
+//        Page<BizBill> page = this.page(dto.convertToPage(), wrapper);
+//
+//        // 批量查类别名称
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(page.getRecords());
+//
+//        // Entity → VO
+//        List<BizBillVo> voList = page.getRecords().stream().map(bill -> {
+//            BizBillVo vo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, vo);
+//            if (bill.getCategoryId() != null) {
+//                vo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return vo;
+//        }).collect(Collectors.toList());
+//
+//        PageResult result = PageResult.fromPage(page);
+//        result.setList(voList);
+//        return result;
+//    }
+//
+//    // ==================== 详情 ====================
+//
+//    @Override
+//    public BizBillDetailVo getBillDetail(Long id) {
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 非管理员只能查看自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")
+//                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能查看自己的票据！");
+//        }
+//
+//        BizBillDetailVo vo = new BizBillDetailVo();
+//        BeanUtils.copyProperties(bill, vo);
+//
+//        // 设置状态文本
+//        vo.setStatusText(getStatusText(bill.getStatus()));
+//
+//        // 查类别名称
+//        if (bill.getCategoryId() != null) {
+//            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//            if (category != null) {
+//                vo.setCategoryName(category.getCategoryName());
+//            }
+//        }
+//
+//        // 查附件列表
+//        List<BizBillFile> files = fileMapper.selectList(
+//                new LambdaQueryWrapper<BizBillFile>()
+//                        .eq(BizBillFile::getBillId, id)
+//                        .orderByAsc(BizBillFile::getSortOrder)
+//        );
+//        vo.setFiles(files.stream().map(f -> {
+//            BizBillFileVo fvo = new BizBillFileVo();
+//            BeanUtils.copyProperties(f, fvo);
+//            // 生成预览和下载URL
+//            fvo.setPreviewUrl("/api/bill/preview/" + f.getId());
+//            fvo.setDownloadUrl("/api/bill/download/" + f.getId());
+//            return fvo;
+//        }).collect(Collectors.toList()));
+//
+//        // 查审核历史
+//        List<BizAuditLog> logs = auditLogMapper.selectList(
+//                new LambdaQueryWrapper<BizAuditLog>()
+//                        .eq(BizAuditLog::getBillId, id)
+//                        .orderByDesc(BizAuditLog::getAuditTime)
+//        );
+//        vo.setAuditLogs(logs.stream().map(l -> {
+//            BizAuditLogVo lvo = new BizAuditLogVo();
+//            BeanUtils.copyProperties(l, lvo);
+//            // 设置操作文本
+//            lvo.setActionText("1".equals(l.getAction()) ? "通过" : "退回");
+//            return lvo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    // ==================== 编辑 ====================
+//
+//    @Override
+//    public void updateBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(dto.getId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可编辑
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能编辑草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能编辑自己的票据！");
+//        }
+//
+//        // 保留字段不被 null 覆盖
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            bill.setAttachment(dto.getAttachment());
+//        }
+//
+//        bill.setTitle(dto.getTitle());
+//        bill.setCategoryId(dto.getCategoryId());
+//        bill.setAmount(dto.getAmount());
+//        bill.setDescription(dto.getDescription());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据更新失败！");
+//        }
+//
+//        // 仅当传入了新附件时才替换旧附件
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                    .eq(BizBillFile::getBillId, bill.getId()));
+//            saveAttachments(bill.getId(), dto.getAttachment());
+//        }
+//    }
+//
+//    // ==================== 提交审核 ====================
+//
+//    @Override
+//    public void submitBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可提交
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能提交草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能提交自己的票据！");
+//        }
+//
+//        // 草稿有临时编号的，替换为正式编号（用主键ID保证并发唯一）
+//        if (StringUtils.isBlank(bill.getBillNo()) || bill.getBillNo().startsWith("DRAFT-")) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//        }
+//
+//        bill.setStatus("1");
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据提交失败！");
+//        }
+//    }
+//
+//    // ==================== 删除 ====================
+//
+//    @Override
+//    public void deleteBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿可删除
+//        if (!"0".equals(bill.getStatus())) {
+//            throw new ServiceException("只能删除草稿状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能删除自己的票据！");
+//        }
+//
+//        // 先删附件，再删票据
+//        fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                .eq(BizBillFile::getBillId, id));
+//        this.removeById(id);
+//    }
+//
+//    // ==================== 审核 ====================
+//
+//    @Override
+//    public void reviewBill(BizBillReviewDto dto) {
+//        // 校验 action 值合法性
+//        if (!List.of("1", "2").contains(dto.getAction())) {
+//            throw new ServiceException("无效的审核结果，action 必须为 1（通过）或 2（退回）！");
+//        }
+//
+//        BizBill bill = this.getById(dto.getBillId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅已提交状态可审核
+//        if (!"1".equals(bill.getStatus())) {
+//            throw new ServiceException("只能审核已提交状态的票据！");
+//        }
+//
+//        // 更新票据审核信息
+//        bill.setStatus(dto.getAction().equals("1") ? "2" : "3");
+//        bill.setAuditBy(SecurityUtils.getUsername());
+//        bill.setAuditTime(new Date());
+//        bill.setAuditComment(dto.getComment());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，审核失败！");
+//        }
+//
+//        // 记录审核历史
+//        BizAuditLog log = BizAuditLog.builder()
+//                .billId(dto.getBillId())
+//                .action(dto.getAction())
+//                .comment(dto.getComment())
+//                .auditBy(SecurityUtils.getUsername())
+//                .auditTime(new Date())
+//                .build();
+//        auditLogMapper.insert(log);
+//    }
+//
+//    // ==================== 附件 ====================
+//
+//    /**
+//     * 解析附件路径字符串，创建附件记录
+//     * @param billId 票据ID
+//     * @param attachment 逗号分隔的附件路径
+//     */
+//    private void saveAttachments(Long billId, String attachment) {
+//        if (StringUtils.isBlank(attachment)) {
+//            return;
+//        }
+//
+//        String[] paths = attachment.split(",");
+//        for (int i = 0; i < paths.length; i++) {
+//            String path = paths[i].trim();
+//            if (StringUtils.isBlank(path)) {
+//                continue;
+//            }
+//
+//            BizBillFile file = BizBillFile.builder()
+//                    .billId(billId)
+//                    .fileName(path.substring(path.lastIndexOf("/") + 1))
+//                    .filePath(path)
+//                    .sortOrder(i)
+//                    .createBy(SecurityUtils.getUsername())
+//                    .createTime(new Date())
+//                    .build();
+//            fileMapper.insert(file);
+//        }
+//    }
+//
+//    // ==================== 工具方法 ====================
+//
+//    /**
+//     * 批量查询类别ID对应的类别名称
+//     */
+//    private String buildOrderSql(String sortField, String sortOrder) {
+//        if (sortField == null || sortField.isEmpty()) return "ORDER BY create_time DESC";
+//        String col = switch (sortField) {
+//            case "amount" -> "amount";
+//            case "createTime" -> "create_time";
+//            case "auditTime" -> "audit_time";
+//            default -> "create_time";
+//        };
+//        String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+//        return "ORDER BY " + col + " " + dir;
+//    }
+//
+//    private Map<Long, String> buildCategoryNameMap(List<BizBill> bills) {
+//        List<Long> categoryIds = bills.stream()
+//                .map(BizBill::getCategoryId)
+//                .filter(id -> id != null)
+//                .distinct()
+//                .collect(Collectors.toList());
+//
+//        if (categoryIds.isEmpty()) {
+//            return new java.util.HashMap<>();
+//        }
+//
+//        List<BizCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+//        return categories.stream()
+//                .collect(Collectors.toMap(BizCategory::getCategoryId, BizCategory::getCategoryName, (a, b) -> a, java.util.HashMap::new));
+//    }
+//
+//    /**
+//     * 生成票据编号: BILL-yyyyMMdd-{billId}
+//     * 使用票据主键ID保证并发安全，避免批量提交时编号重复
+//     */
+//    private String generateBillNo(Long billId) {
+//        String dateStr = new SimpleDateFormat("yyyyMMdd").format(new Date());
+//        return String.format("BILL-%s-%04d", dateStr, billId);
+//    }
+//
+//    /**
+//     * 获取状态文本
+//     */
+//    private String getStatusText(String status) {
+//        if (status == null) return "未知";
+//        switch (status) {
+//            case "0": return "草稿";
+//            case "1": return "已提交";
+//            case "2": return "已通过";
+//            case "3": return "已退回";
+//            default: return "未知";
+//        }
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getMonthlyTrend() {
+//        Calendar now = Calendar.getInstance();
+//        int year = now.get(Calendar.YEAR);
+//        int month = now.get(Calendar.MONTH) + 1;
+//
+//        Calendar start = Calendar.getInstance();
+//        start.set(year, month - 1, 1, 0, 0, 0);
+//        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+//        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+//
+//        LambdaQueryWrapper<BizBill> trendWrapper = new LambdaQueryWrapper<BizBill>()
+//                .ge(BizBill::getUpdateTime, startStr)
+//                .le(BizBill::getUpdateTime, endStr)
+//                .ne(BizBill::getStatus, "0");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            trendWrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            trendWrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(trendWrapper);
+//
+//        Map<String, Long> weekMap = new LinkedHashMap<>();
+//        for (int i = 1; i <= 4; i++) {
+//            weekMap.put("第" + i + "周", 0L);
+//        }
+//
+//        for (BizBill bill : bills) {
+//            Calendar cal = Calendar.getInstance();
+//            cal.setTime(bill.getUpdateTime());
+//            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+//            String weekLabel = "第" + ((dayOfMonth - 1) / 7 + 1) + "周";
+//            weekMap.merge(weekLabel, 1L, Long::sum);
+//        }
+//
+//        List<TrendItemVo> result = new ArrayList<>();
+//        weekMap.forEach((label, count) -> result.add(new TrendItemVo(label, count)));
+//        return result;
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getCategoryAmountSummary() {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getStatus, "2");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(wrapper);
+//
+//        Map<Long, Long> amountMap = new LinkedHashMap<>();
+//        Map<Long, String> nameMap = new LinkedHashMap<>();
+//
+//        for (BizBill bill : bills) {
+//            Long cid = bill.getCategoryId();
+//            if (cid != null) {
+//                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+//                if (!nameMap.containsKey(cid)) {
+//                    BizCategory cat = categoryMapper.selectById(cid);
+//                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+//                }
+//            }
+//        }
+//
+//        return amountMap.entrySet().stream()
+//                .map(e -> new TrendItemVo(nameMap.getOrDefault(e.getKey(), "未知"), e.getValue()))
+//                .collect(Collectors.toList());
+//    }
+//
+//    @Override
+//    public ReviewerStatsVo getReviewerStats() {
+//        String username = SecurityUtils.getUsername();
+//        ReviewerStatsVo vo = new ReviewerStatsVo();
+//
+//        // 待审核数量
+//        vo.setPendingCount((int) this.count(
+//                new LambdaQueryWrapper<BizBill>().eq(BizBill::getStatus, "1")));
+//
+//        // 今日通过/退回
+//        String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+//        int todayApproved = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "2")
+//                        .ge(BizBill::getAuditTime, today));
+//        int todayRejected = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "3")
+//                        .ge(BizBill::getAuditTime, today));
+//        vo.setTodayApproved(todayApproved);
+//        vo.setTodayRejected(todayRejected);
+//
+//        // 通过率
+//        int totalReviewed = todayApproved + todayRejected;
+//        vo.setApprovalRate(totalReviewed > 0
+//                ? Math.round(todayApproved * 100.0 / totalReviewed) : 0);
+//
+//        // 积压预警: 超过3天未审核
+//        Calendar cal = Calendar.getInstance();
+//        cal.add(Calendar.DAY_OF_MONTH, -3);
+//        vo.setStalePending((int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getStatus, "1")
+//                        .lt(BizBill::getCreateTime, cal.getTime())));
+//
+//        // 最近审核记录
+//        List<BizBill> recentBills = this.list(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .in(BizBill::getStatus, "2", "3")
+//                        .orderByDesc(BizBill::getAuditTime)
+//                        .last("LIMIT 5"));
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(recentBills);
+//        vo.setRecentReviews(recentBills.stream().map(bill -> {
+//            BizBillVo billVo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, billVo);
+//            if (bill.getCategoryId() != null) {
+//                billVo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return billVo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    @Override
+//    public UserBillStatsVo getUserBillStats() {
+//        String username = SecurityUtils.getUsername();
+//
+//        // 查询当前用户的所有票据
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getCreateBy, username);
+//        List<BizBill> allBills = this.list(wrapper);
+//
+//        // 统计各状态数量
+//        long draftCount = allBills.stream().filter(b -> "0".equals(b.getStatus())).count();
+//        long submittedCount = allBills.stream().filter(b -> "1".equals(b.getStatus())).count();
+//        long approvedCount = allBills.stream().filter(b -> "2".equals(b.getStatus())).count();
+//        long rejectedCount = allBills.stream().filter(b -> "3".equals(b.getStatus())).count();
+//
+//        // 计算已通过票据的总金额
+//        java.math.BigDecimal totalAmount = allBills.stream()
+//                .filter(b -> "2".equals(b.getStatus()))
+//                .map(BizBill::getAmount)
+//                .filter(amount -> amount != null)
+//                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+//
+//        return UserBillStatsVo.builder()
+//                .totalCount((long) allBills.size())
+//                .draftCount(draftCount)
+//                .submittedCount(submittedCount)
+//                .approvedCount(approvedCount)
+//                .rejectedCount(rejectedCount)
+//                .totalAmount(totalAmount.setScale(2, java.math.RoundingMode.HALF_UP).toString())
+//                .build();
+//    }
+//
+//}
+//package com.zsc.module.service.impl;
+//
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+//import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+//import com.zsc.common.utils.SecurityUtils;
+//import com.zsc.module.common.exception.ServiceException;
+//import com.zsc.module.common.pagination.PageResult;
+//import com.zsc.module.domain.dto.BizBillDto;
+//import com.zsc.module.domain.dto.BizBillReviewDto;
+//import com.zsc.module.domain.dto.query.BizBillQueryDto;
+//import com.zsc.module.domain.entity.BizAuditLog;
+//import com.zsc.module.domain.entity.BizBill;
+//import com.zsc.module.domain.entity.BizBillFile;
+//import com.zsc.module.domain.entity.BizCategory;
+//import com.zsc.module.domain.vo.BizAuditLogVo;
+//import com.zsc.module.domain.vo.BizBillDetailVo;
+//import com.zsc.module.domain.vo.BizBillFileVo;
+//import com.zsc.module.domain.vo.BizBillVo;
+//import com.zsc.module.domain.vo.ReviewerStatsVo;
+//import com.zsc.module.domain.vo.TrendItemVo;
+//import com.zsc.module.domain.vo.UserBillStatsVo;
+//import com.zsc.module.mapper.BizAuditLogMapper;
+//import com.zsc.module.mapper.BizBillFileMapper;
+//import com.zsc.module.mapper.BizBillMapper;
+//import com.zsc.module.mapper.BizCategoryMapper;
+//import com.zsc.module.service.BizBillService;
+//import org.apache.commons.lang3.StringUtils;
+//import org.springframework.beans.BeanUtils;
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//
+//import java.text.SimpleDateFormat;
+//import java.util.Calendar;
+//import java.util.ArrayList;
+//import java.util.Date;
+//import java.util.LinkedHashMap;
+//import java.util.List;
+//import java.util.Map;
+//import java.util.stream.Collectors;
+//
+///**
+// * 票据表 服务实现类
+// */
+//@Service
+//@Transactional
+//public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> implements BizBillService {
+//
+//    @Autowired
+//    private BizBillFileMapper fileMapper;
+//
+//    @Autowired
+//    private BizAuditLogMapper auditLogMapper;
+//
+//    @Autowired
+//    private BizCategoryMapper categoryMapper;
+//
+//    /**
+//     * 管理员禁止执行用户专属操作
+//     */
+//    private void checkNotAdmin() {
+//        if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            throw new ServiceException("管理员不能执行用户操作！");
+//        }
+//    }
+//
+//    // ==================== 新增 ====================
+//
+//    @Override
+//    public void addBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = new BizBill();
+//        BeanUtils.copyProperties(dto, bill);
+//
+//        bill.setCreateBy(SecurityUtils.getUsername());
+//        bill.setCreateTime(new Date());
+//
+//        // 先保存草稿（用临时编号占位），再根据状态替换为正式编号
+//        bill.setBillNo("DRAFT-" + System.currentTimeMillis());
+//
+//        if (!this.save(bill)) {
+//            throw new ServiceException("系统错误，票据保存失败！");
+//        }
+//
+//        if ("1".equals(dto.getStatus())) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//            this.updateById(bill);
+//        }
+//
+//        // 保存附件记录
+//        saveAttachments(bill.getId(), dto.getAttachment());
+//    }
+//
+//    // ==================== 查询列表 ====================
+//
+//    @Override
+//    public PageResult<BizBillVo> queryBills(BizBillQueryDto dto) {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<>();
+//
+//        // 普通用户只查自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//
+//        // 条件过滤
+//        if (StringUtils.isNotBlank(dto.getKeywords())) {
+//            wrapper.and(w -> w
+//                    .like(BizBill::getTitle, dto.getKeywords())
+//                    .or()
+//                    .like(BizBill::getBillNo, dto.getKeywords())
+//            );
+//        }
+//        wrapper.eq(dto.getCategoryId() != null, BizBill::getCategoryId, dto.getCategoryId())
+//                .eq(StringUtils.isNotBlank(dto.getStatus()), BizBill::getStatus, dto.getStatus())
+//                .like(StringUtils.isNotBlank(dto.getAuditBy()), BizBill::getAuditBy, dto.getAuditBy())
+//                .like(StringUtils.isNotBlank(dto.getCreateBy()), BizBill::getCreateBy, dto.getCreateBy())
+//                .ge(dto.getMinAmount() != null, BizBill::getAmount, dto.getMinAmount())
+//                .le(dto.getMaxAmount() != null, BizBill::getAmount, dto.getMaxAmount())
+//                .ge(StringUtils.isNotBlank(dto.getStartTime()), BizBill::getCreateTime, dto.getStartTime())
+//                .le(StringUtils.isNotBlank(dto.getEndTime()), BizBill::getCreateTime, dto.getEndTime())
+//                .last(buildOrderSql(dto.getSortField(), dto.getSortOrder()));
+//
+//        Page<BizBill> page = this.page(dto.convertToPage(), wrapper);
+//
+//        // 批量查类别名称
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(page.getRecords());
+//
+//        // Entity → VO
+//        List<BizBillVo> voList = page.getRecords().stream().map(bill -> {
+//            BizBillVo vo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, vo);
+//            if (bill.getCategoryId() != null) {
+//                vo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return vo;
+//        }).collect(Collectors.toList());
+//
+//        PageResult result = PageResult.fromPage(page);
+//        result.setList(voList);
+//        return result;
+//    }
+//
+//    // ==================== 详情 ====================
+//
+//    @Override
+//    public BizBillDetailVo getBillDetail(Long id) {
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 非管理员只能查看自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")
+//                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能查看自己的票据！");
+//        }
+//
+//        BizBillDetailVo vo = new BizBillDetailVo();
+//        BeanUtils.copyProperties(bill, vo);
+//
+//        // 设置状态文本
+//        vo.setStatusText(getStatusText(bill.getStatus()));
+//
+//        // 查类别名称
+//        if (bill.getCategoryId() != null) {
+//            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//            if (category != null) {
+//                vo.setCategoryName(category.getCategoryName());
+//            }
+//        }
+//
+//        // 查附件列表
+//        List<BizBillFile> files = fileMapper.selectList(
+//                new LambdaQueryWrapper<BizBillFile>()
+//                        .eq(BizBillFile::getBillId, id)
+//                        .orderByAsc(BizBillFile::getSortOrder)
+//        );
+//        vo.setFiles(files.stream().map(f -> {
+//            BizBillFileVo fvo = new BizBillFileVo();
+//            BeanUtils.copyProperties(f, fvo);
+//            // 生成预览和下载URL
+//            fvo.setPreviewUrl("/api/bill/preview/" + f.getId());
+//            fvo.setDownloadUrl("/api/bill/download/" + f.getId());
+//            return fvo;
+//        }).collect(Collectors.toList()));
+//
+//        // 查审核历史
+//        List<BizAuditLog> logs = auditLogMapper.selectList(
+//                new LambdaQueryWrapper<BizAuditLog>()
+//                        .eq(BizAuditLog::getBillId, id)
+//                        .orderByDesc(BizAuditLog::getAuditTime)
+//        );
+//        vo.setAuditLogs(logs.stream().map(l -> {
+//            BizAuditLogVo lvo = new BizAuditLogVo();
+//            BeanUtils.copyProperties(l, lvo);
+//            // 设置操作文本
+//            lvo.setActionText("1".equals(l.getAction()) ? "通过" : "退回");
+//            return lvo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    // ==================== 编辑 ====================
+//
+//    @Override
+//    public void updateBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(dto.getId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可编辑
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能编辑草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能编辑自己的票据！");
+//        }
+//
+//        // 保留字段不被 null 覆盖
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            bill.setAttachment(dto.getAttachment());
+//        }
+//
+//        bill.setTitle(dto.getTitle());
+//        bill.setCategoryId(dto.getCategoryId());
+//        bill.setAmount(dto.getAmount());
+//        bill.setDescription(dto.getDescription());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据更新失败！");
+//        }
+//
+//        // 仅当传入了新附件时才替换旧附件
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                    .eq(BizBillFile::getBillId, bill.getId()));
+//            saveAttachments(bill.getId(), dto.getAttachment());
+//        }
+//    }
+//
+//    // ==================== 提交审核 ====================
+//
+//    @Override
+//    public void submitBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可提交
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能提交草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能提交自己的票据！");
+//        }
+//
+//        // 草稿有临时编号的，替换为正式编号（用主键ID保证并发唯一）
+//        if (StringUtils.isBlank(bill.getBillNo()) || bill.getBillNo().startsWith("DRAFT-")) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//        }
+//
+//        bill.setStatus("1");
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据提交失败！");
+//        }
+//    }
+//
+//    // ==================== 删除 ====================
+//
+//    @Override
+//    public void deleteBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿可删除
+//        if (!"0".equals(bill.getStatus())) {
+//            throw new ServiceException("只能删除草稿状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能删除自己的票据！");
+//        }
+//
+//        // 先删附件，再删票据
+//        fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                .eq(BizBillFile::getBillId, id));
+//        this.removeById(id);
+//    }
+//
+//    // ==================== 审核 ====================
+//
+//    @Override
+//    public void reviewBill(BizBillReviewDto dto) {
+//        // 校验 action 值合法性
+//        if (!List.of("1", "2").contains(dto.getAction())) {
+//            throw new ServiceException("无效的审核结果，action 必须为 1（通过）或 2（退回）！");
+//        }
+//
+//        BizBill bill = this.getById(dto.getBillId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅已提交状态可审核
+//        if (!"1".equals(bill.getStatus())) {
+//            throw new ServiceException("只能审核已提交状态的票据！");
+//        }
+//
+//        // 更新票据审核信息
+//        bill.setStatus(dto.getAction().equals("1") ? "2" : "3");
+//        bill.setAuditBy(SecurityUtils.getUsername());
+//        bill.setAuditTime(new Date());
+//        bill.setAuditComment(dto.getComment());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，审核失败！");
+//        }
+//
+//        // 记录审核历史
+//        BizAuditLog log = BizAuditLog.builder()
+//                .billId(dto.getBillId())
+//                .action(dto.getAction())
+//                .comment(dto.getComment())
+//                .auditBy(SecurityUtils.getUsername())
+//                .auditTime(new Date())
+//                .build();
+//        auditLogMapper.insert(log);
+//    }
+//
+//    // ==================== 附件 ====================
+//
+//    /**
+//     * 解析附件路径字符串，创建附件记录
+//     * @param billId 票据ID
+//     * @param attachment 逗号分隔的附件路径
+//     */
+//    private void saveAttachments(Long billId, String attachment) {
+//        if (StringUtils.isBlank(attachment)) {
+//            return;
+//        }
+//
+//        String[] paths = attachment.split(",");
+//        for (int i = 0; i < paths.length; i++) {
+//            String path = paths[i].trim();
+//            if (StringUtils.isBlank(path)) {
+//                continue;
+//            }
+//
+//            BizBillFile file = BizBillFile.builder()
+//                    .billId(billId)
+//                    .fileName(path.substring(path.lastIndexOf("/") + 1))
+//                    .filePath(path)
+//                    .sortOrder(i)
+//                    .createBy(SecurityUtils.getUsername())
+//                    .createTime(new Date())
+//                    .build();
+//            fileMapper.insert(file);
+//        }
+//    }
+//
+//    // ==================== 工具方法 ====================
+//
+//    /**
+//     * 批量查询类别ID对应的类别名称
+//     */
+//    private String buildOrderSql(String sortField, String sortOrder) {
+//        if (sortField == null || sortField.isEmpty()) return "ORDER BY create_time DESC";
+//        String col = switch (sortField) {
+//            case "amount" -> "amount";
+//            case "createTime" -> "create_time";
+//            case "auditTime" -> "audit_time";
+//            default -> "create_time";
+//        };
+//        String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+//        return "ORDER BY " + col + " " + dir;
+//    }
+//
+//    private Map<Long, String> buildCategoryNameMap(List<BizBill> bills) {
+//        List<Long> categoryIds = bills.stream()
+//                .map(BizBill::getCategoryId)
+//                .filter(id -> id != null)
+//                .distinct()
+//                .collect(Collectors.toList());
+//
+//        if (categoryIds.isEmpty()) {
+//            return new java.util.HashMap<>();
+//        }
+//
+//        List<BizCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+//        return categories.stream()
+//                .collect(Collectors.toMap(BizCategory::getCategoryId, BizCategory::getCategoryName, (a, b) -> a, java.util.HashMap::new));
+//    }
+//
+//    /**
+//     * 生成票据编号: BILL-yyyyMMdd-{billId}
+//     * 使用票据主键ID保证并发安全，避免批量提交时编号重复
+//     */
+//    private String generateBillNo(Long billId) {
+//        String dateStr = new SimpleDateFormat("yyyyMMdd").format(new Date());
+//        return String.format("BILL-%s-%04d", dateStr, billId);
+//    }
+//
+//    /**
+//     * 获取状态文本
+//     */
+//    private String getStatusText(String status) {
+//        if (status == null) return "未知";
+//        switch (status) {
+//            case "0": return "草稿";
+//            case "1": return "已提交";
+//            case "2": return "已通过";
+//            case "3": return "已退回";
+//            default: return "未知";
+//        }
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getMonthlyTrend() {
+//        Calendar now = Calendar.getInstance();
+//        int year = now.get(Calendar.YEAR);
+//        int month = now.get(Calendar.MONTH) + 1;
+//
+//        Calendar start = Calendar.getInstance();
+//        start.set(year, month - 1, 1, 0, 0, 0);
+//        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+//        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+//
+//        LambdaQueryWrapper<BizBill> trendWrapper = new LambdaQueryWrapper<BizBill>()
+//                .ge(BizBill::getUpdateTime, startStr)
+//                .le(BizBill::getUpdateTime, endStr)
+//                .ne(BizBill::getStatus, "0");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            trendWrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            trendWrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(trendWrapper);
+//
+//        Map<String, Long> weekMap = new LinkedHashMap<>();
+//        for (int i = 1; i <= 4; i++) {
+//            weekMap.put("第" + i + "周", 0L);
+//        }
+//
+//        for (BizBill bill : bills) {
+//            Calendar cal = Calendar.getInstance();
+//            cal.setTime(bill.getUpdateTime());
+//            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+//            String weekLabel = "第" + ((dayOfMonth - 1) / 7 + 1) + "周";
+//            weekMap.merge(weekLabel, 1L, Long::sum);
+//        }
+//
+//        List<TrendItemVo> result = new ArrayList<>();
+//        weekMap.forEach((label, count) -> result.add(new TrendItemVo(label, count)));
+//        return result;
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getCategoryAmountSummary() {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getStatus, "2");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(wrapper);
+//
+//        Map<Long, Long> amountMap = new LinkedHashMap<>();
+//        Map<Long, String> nameMap = new LinkedHashMap<>();
+//
+//        for (BizBill bill : bills) {
+//            Long cid = bill.getCategoryId();
+//            if (cid != null) {
+//                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+//                if (!nameMap.containsKey(cid)) {
+//                    BizCategory cat = categoryMapper.selectById(cid);
+//                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+//                }
+//            }
+//        }
+//
+//        return amountMap.entrySet().stream()
+//                .map(e -> new TrendItemVo(nameMap.getOrDefault(e.getKey(), "未知"), e.getValue()))
+//                .collect(Collectors.toList());
+//    }
+//
+//    @Override
+//    public ReviewerStatsVo getReviewerStats() {
+//        String username = SecurityUtils.getUsername();
+//        ReviewerStatsVo vo = new ReviewerStatsVo();
+//
+//        // 待审核数量
+//        vo.setPendingCount((int) this.count(
+//                new LambdaQueryWrapper<BizBill>().eq(BizBill::getStatus, "1")));
+//
+//        // 今日通过/退回
+//        String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+//        int todayApproved = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "2")
+//                        .ge(BizBill::getAuditTime, today));
+//        int todayRejected = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "3")
+//                        .ge(BizBill::getAuditTime, today));
+//        vo.setTodayApproved(todayApproved);
+//        vo.setTodayRejected(todayRejected);
+//
+//        // 通过率
+//        int totalReviewed = todayApproved + todayRejected;
+//        vo.setApprovalRate(totalReviewed > 0
+//                ? Math.round(todayApproved * 100.0 / totalReviewed) : 0);
+//
+//        // 积压预警: 超过3天未审核
+//        Calendar cal = Calendar.getInstance();
+//        cal.add(Calendar.DAY_OF_MONTH, -3);
+//        vo.setStalePending((int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getStatus, "1")
+//                        .lt(BizBill::getCreateTime, cal.getTime())));
+//
+//        // 最近审核记录
+//        List<BizBill> recentBills = this.list(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .in(BizBill::getStatus, "2", "3")
+//                        .orderByDesc(BizBill::getAuditTime)
+//                        .last("LIMIT 5"));
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(recentBills);
+//        vo.setRecentReviews(recentBills.stream().map(bill -> {
+//            BizBillVo billVo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, billVo);
+//            if (bill.getCategoryId() != null) {
+//                billVo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return billVo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    @Override
+//    public UserBillStatsVo getUserBillStats() {
+//        String username = SecurityUtils.getUsername();
+//
+//        // 查询当前用户的所有票据
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getCreateBy, username);
+//        List<BizBill> allBills = this.list(wrapper);
+//
+//        // 统计各状态数量
+//        long draftCount = allBills.stream().filter(b -> "0".equals(b.getStatus())).count();
+//        long submittedCount = allBills.stream().filter(b -> "1".equals(b.getStatus())).count();
+//        long approvedCount = allBills.stream().filter(b -> "2".equals(b.getStatus())).count();
+//        long rejectedCount = allBills.stream().filter(b -> "3".equals(b.getStatus())).count();
+//
+//        // 计算已通过票据的总金额
+//        java.math.BigDecimal totalAmount = allBills.stream()
+//                .filter(b -> "2".equals(b.getStatus()))
+//                .map(BizBill::getAmount)
+//                .filter(amount -> amount != null)
+//                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+//
+//        return UserBillStatsVo.builder()
+//                .totalCount((long) allBills.size())
+//                .draftCount(draftCount)
+//                .submittedCount(submittedCount)
+//                .approvedCount(approvedCount)
+//                .rejectedCount(rejectedCount)
+//                .totalAmount(totalAmount.setScale(2, java.math.RoundingMode.HALF_UP).toString())
+//                .build();
+//    }
+//
+//}
+//package com.zsc.module.service.impl;
+//
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+//import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+//import com.zsc.common.utils.SecurityUtils;
+//import com.zsc.module.common.exception.ServiceException;
+//import com.zsc.module.common.pagination.PageResult;
+//import com.zsc.module.domain.dto.BizBillDto;
+//import com.zsc.module.domain.dto.BizBillReviewDto;
+//import com.zsc.module.domain.dto.query.BizBillQueryDto;
+//import com.zsc.module.domain.entity.BizAuditLog;
+//import com.zsc.module.domain.entity.BizBill;
+//import com.zsc.module.domain.entity.BizBillFile;
+//import com.zsc.module.domain.entity.BizCategory;
+//import com.zsc.module.domain.vo.BizAuditLogVo;
+//import com.zsc.module.domain.vo.BizBillDetailVo;
+//import com.zsc.module.domain.vo.BizBillFileVo;
+//import com.zsc.module.domain.vo.BizBillVo;
+//import com.zsc.module.domain.vo.ReviewerStatsVo;
+//import com.zsc.module.domain.vo.TrendItemVo;
+//import com.zsc.module.domain.vo.UserBillStatsVo;
+//import com.zsc.module.mapper.BizAuditLogMapper;
+//import com.zsc.module.mapper.BizBillFileMapper;
+//import com.zsc.module.mapper.BizBillMapper;
+//import com.zsc.module.mapper.BizCategoryMapper;
+//import com.zsc.module.service.BizBillService;
+//import org.apache.commons.lang3.StringUtils;
+//import org.springframework.beans.BeanUtils;
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//
+//import java.text.SimpleDateFormat;
+//import java.util.Calendar;
+//import java.util.ArrayList;
+//import java.util.Date;
+//import java.util.LinkedHashMap;
+//import java.util.List;
+//import java.util.Map;
+//import java.util.stream.Collectors;
+//
+///**
+// * 票据表 服务实现类
+// */
+//@Service
+//@Transactional
+//public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> implements BizBillService {
+//
+//    @Autowired
+//    private BizBillFileMapper fileMapper;
+//
+//    @Autowired
+//    private BizAuditLogMapper auditLogMapper;
+//
+//    @Autowired
+//    private BizCategoryMapper categoryMapper;
+//
+//    /**
+//     * 管理员禁止执行用户专属操作
+//     */
+//    private void checkNotAdmin() {
+//        if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            throw new ServiceException("管理员不能执行用户操作！");
+//        }
+//    }
+//
+//    // ==================== 新增 ====================
+//
+//    @Override
+//    public void addBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = new BizBill();
+//        BeanUtils.copyProperties(dto, bill);
+//
+//        bill.setCreateBy(SecurityUtils.getUsername());
+//        bill.setCreateTime(new Date());
+//
+//        // 先保存草稿（用临时编号占位），再根据状态替换为正式编号
+//        bill.setBillNo("DRAFT-" + System.currentTimeMillis());
+//
+//        if (!this.save(bill)) {
+//            throw new ServiceException("系统错误，票据保存失败！");
+//        }
+//
+//        if ("1".equals(dto.getStatus())) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//            this.updateById(bill);
+//        }
+//
+//        // 保存附件记录
+//        saveAttachments(bill.getId(), dto.getAttachment());
+//    }
+//
+//    // ==================== 查询列表 ====================
+//
+//    @Override
+//    public PageResult<BizBillVo> queryBills(BizBillQueryDto dto) {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<>();
+//
+//        // 普通用户只查自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//
+//        // 条件过滤
+//        if (StringUtils.isNotBlank(dto.getKeywords())) {
+//            wrapper.and(w -> w
+//                    .like(BizBill::getTitle, dto.getKeywords())
+//                    .or()
+//                    .like(BizBill::getBillNo, dto.getKeywords())
+//            );
+//        }
+//        wrapper.eq(dto.getCategoryId() != null, BizBill::getCategoryId, dto.getCategoryId())
+//                .eq(StringUtils.isNotBlank(dto.getStatus()), BizBill::getStatus, dto.getStatus())
+//                .like(StringUtils.isNotBlank(dto.getAuditBy()), BizBill::getAuditBy, dto.getAuditBy())
+//                .like(StringUtils.isNotBlank(dto.getCreateBy()), BizBill::getCreateBy, dto.getCreateBy())
+//                .ge(dto.getMinAmount() != null, BizBill::getAmount, dto.getMinAmount())
+//                .le(dto.getMaxAmount() != null, BizBill::getAmount, dto.getMaxAmount())
+//                .ge(StringUtils.isNotBlank(dto.getStartTime()), BizBill::getCreateTime, dto.getStartTime())
+//                .le(StringUtils.isNotBlank(dto.getEndTime()), BizBill::getCreateTime, dto.getEndTime())
+//                .last(buildOrderSql(dto.getSortField(), dto.getSortOrder()));
+//
+//        Page<BizBill> page = this.page(dto.convertToPage(), wrapper);
+//
+//        // 批量查类别名称
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(page.getRecords());
+//
+//        // Entity → VO
+//        List<BizBillVo> voList = page.getRecords().stream().map(bill -> {
+//            BizBillVo vo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, vo);
+//            if (bill.getCategoryId() != null) {
+//                vo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return vo;
+//        }).collect(Collectors.toList());
+//
+//        PageResult result = PageResult.fromPage(page);
+//        result.setList(voList);
+//        return result;
+//    }
+//
+//    // ==================== 详情 ====================
+//
+//    @Override
+//    public BizBillDetailVo getBillDetail(Long id) {
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 非管理员只能查看自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")
+//                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能查看自己的票据！");
+//        }
+//
+//        BizBillDetailVo vo = new BizBillDetailVo();
+//        BeanUtils.copyProperties(bill, vo);
+//
+//        // 设置状态文本
+//        vo.setStatusText(getStatusText(bill.getStatus()));
+//
+//        // 查类别名称
+//        if (bill.getCategoryId() != null) {
+//            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//            if (category != null) {
+//                vo.setCategoryName(category.getCategoryName());
+//            }
+//        }
+//
+//        // 查附件列表
+//        List<BizBillFile> files = fileMapper.selectList(
+//                new LambdaQueryWrapper<BizBillFile>()
+//                        .eq(BizBillFile::getBillId, id)
+//                        .orderByAsc(BizBillFile::getSortOrder)
+//        );
+//        vo.setFiles(files.stream().map(f -> {
+//            BizBillFileVo fvo = new BizBillFileVo();
+//            BeanUtils.copyProperties(f, fvo);
+//            // 生成预览和下载URL
+//            fvo.setPreviewUrl("/api/bill/preview/" + f.getId());
+//            fvo.setDownloadUrl("/api/bill/download/" + f.getId());
+//            return fvo;
+//        }).collect(Collectors.toList()));
+//
+//        // 查审核历史
+//        List<BizAuditLog> logs = auditLogMapper.selectList(
+//                new LambdaQueryWrapper<BizAuditLog>()
+//                        .eq(BizAuditLog::getBillId, id)
+//                        .orderByDesc(BizAuditLog::getAuditTime)
+//        );
+//        vo.setAuditLogs(logs.stream().map(l -> {
+//            BizAuditLogVo lvo = new BizAuditLogVo();
+//            BeanUtils.copyProperties(l, lvo);
+//            // 设置操作文本
+//            lvo.setActionText("1".equals(l.getAction()) ? "通过" : "退回");
+//            return lvo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    // ==================== 编辑 ====================
+//
+//    @Override
+//    public void updateBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(dto.getId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可编辑
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能编辑草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能编辑自己的票据！");
+//        }
+//
+//        // 保留字段不被 null 覆盖
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            bill.setAttachment(dto.getAttachment());
+//        }
+//
+//        bill.setTitle(dto.getTitle());
+//        bill.setCategoryId(dto.getCategoryId());
+//        bill.setAmount(dto.getAmount());
+//        bill.setDescription(dto.getDescription());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据更新失败！");
+//        }
+//
+//        // 仅当传入了新附件时才替换旧附件
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                    .eq(BizBillFile::getBillId, bill.getId()));
+//            saveAttachments(bill.getId(), dto.getAttachment());
+//        }
+//    }
+//
+//    // ==================== 提交审核 ====================
+//
+//    @Override
+//    public void submitBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可提交
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能提交草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能提交自己的票据！");
+//        }
+//
+//        // 草稿有临时编号的，替换为正式编号（用主键ID保证并发唯一）
+//        if (StringUtils.isBlank(bill.getBillNo()) || bill.getBillNo().startsWith("DRAFT-")) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//        }
+//
+//        bill.setStatus("1");
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据提交失败！");
+//        }
+//    }
+//
+//    // ==================== 删除 ====================
+//
+//    @Override
+//    public void deleteBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿可删除
+//        if (!"0".equals(bill.getStatus())) {
+//            throw new ServiceException("只能删除草稿状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能删除自己的票据！");
+//        }
+//
+//        // 先删附件，再删票据
+//        fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                .eq(BizBillFile::getBillId, id));
+//        this.removeById(id);
+//    }
+//
+//    // ==================== 审核 ====================
+//
+//    @Override
+//    public void reviewBill(BizBillReviewDto dto) {
+//        // 校验 action 值合法性
+//        if (!List.of("1", "2").contains(dto.getAction())) {
+//            throw new ServiceException("无效的审核结果，action 必须为 1（通过）或 2（退回）！");
+//        }
+//
+//        BizBill bill = this.getById(dto.getBillId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅已提交状态可审核
+//        if (!"1".equals(bill.getStatus())) {
+//            throw new ServiceException("只能审核已提交状态的票据！");
+//        }
+//
+//        // 更新票据审核信息
+//        bill.setStatus(dto.getAction().equals("1") ? "2" : "3");
+//        bill.setAuditBy(SecurityUtils.getUsername());
+//        bill.setAuditTime(new Date());
+//        bill.setAuditComment(dto.getComment());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，审核失败！");
+//        }
+//
+//        // 记录审核历史
+//        BizAuditLog log = BizAuditLog.builder()
+//                .billId(dto.getBillId())
+//                .action(dto.getAction())
+//                .comment(dto.getComment())
+//                .auditBy(SecurityUtils.getUsername())
+//                .auditTime(new Date())
+//                .build();
+//        auditLogMapper.insert(log);
+//    }
+//
+//    // ==================== 附件 ====================
+//
+//    /**
+//     * 解析附件路径字符串，创建附件记录
+//     * @param billId 票据ID
+//     * @param attachment 逗号分隔的附件路径
+//     */
+//    private void saveAttachments(Long billId, String attachment) {
+//        if (StringUtils.isBlank(attachment)) {
+//            return;
+//        }
+//
+//        String[] paths = attachment.split(",");
+//        for (int i = 0; i < paths.length; i++) {
+//            String path = paths[i].trim();
+//            if (StringUtils.isBlank(path)) {
+//                continue;
+//            }
+//
+//            BizBillFile file = BizBillFile.builder()
+//                    .billId(billId)
+//                    .fileName(path.substring(path.lastIndexOf("/") + 1))
+//                    .filePath(path)
+//                    .sortOrder(i)
+//                    .createBy(SecurityUtils.getUsername())
+//                    .createTime(new Date())
+//                    .build();
+//            fileMapper.insert(file);
+//        }
+//    }
+//
+//    // ==================== 工具方法 ====================
+//
+//    /**
+//     * 批量查询类别ID对应的类别名称
+//     */
+//    private String buildOrderSql(String sortField, String sortOrder) {
+//        if (sortField == null || sortField.isEmpty()) return "ORDER BY create_time DESC";
+//        String col = switch (sortField) {
+//            case "amount" -> "amount";
+//            case "createTime" -> "create_time";
+//            case "auditTime" -> "audit_time";
+//            default -> "create_time";
+//        };
+//        String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+//        return "ORDER BY " + col + " " + dir;
+//    }
+//
+//    private Map<Long, String> buildCategoryNameMap(List<BizBill> bills) {
+//        List<Long> categoryIds = bills.stream()
+//                .map(BizBill::getCategoryId)
+//                .filter(id -> id != null)
+//                .distinct()
+//                .collect(Collectors.toList());
+//
+//        if (categoryIds.isEmpty()) {
+//            return new java.util.HashMap<>();
+//        }
+//
+//        List<BizCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+//        return categories.stream()
+//                .collect(Collectors.toMap(BizCategory::getCategoryId, BizCategory::getCategoryName, (a, b) -> a, java.util.HashMap::new));
+//    }
+//
+//    /**
+//     * 生成票据编号: BILL-yyyyMMdd-{billId}
+//     * 使用票据主键ID保证并发安全，避免批量提交时编号重复
+//     */
+//    private String generateBillNo(Long billId) {
+//        String dateStr = new SimpleDateFormat("yyyyMMdd").format(new Date());
+//        return String.format("BILL-%s-%04d", dateStr, billId);
+//    }
+//
+//    /**
+//     * 获取状态文本
+//     */
+//    private String getStatusText(String status) {
+//        if (status == null) return "未知";
+//        switch (status) {
+//            case "0": return "草稿";
+//            case "1": return "已提交";
+//            case "2": return "已通过";
+//            case "3": return "已退回";
+//            default: return "未知";
+//        }
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getMonthlyTrend() {
+//        Calendar now = Calendar.getInstance();
+//        int year = now.get(Calendar.YEAR);
+//        int month = now.get(Calendar.MONTH) + 1;
+//
+//        Calendar start = Calendar.getInstance();
+//        start.set(year, month - 1, 1, 0, 0, 0);
+//        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+//        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+//
+//        LambdaQueryWrapper<BizBill> trendWrapper = new LambdaQueryWrapper<BizBill>()
+//                .ge(BizBill::getUpdateTime, startStr)
+//                .le(BizBill::getUpdateTime, endStr)
+//                .ne(BizBill::getStatus, "0");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            trendWrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            trendWrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(trendWrapper);
+//
+//        Map<String, Long> weekMap = new LinkedHashMap<>();
+//        for (int i = 1; i <= 4; i++) {
+//            weekMap.put("第" + i + "周", 0L);
+//        }
+//
+//        for (BizBill bill : bills) {
+//            Calendar cal = Calendar.getInstance();
+//            cal.setTime(bill.getUpdateTime());
+//            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+//            String weekLabel = "第" + ((dayOfMonth - 1) / 7 + 1) + "周";
+//            weekMap.merge(weekLabel, 1L, Long::sum);
+//        }
+//
+//        List<TrendItemVo> result = new ArrayList<>();
+//        weekMap.forEach((label, count) -> result.add(new TrendItemVo(label, count)));
+//        return result;
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getCategoryAmountSummary() {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getStatus, "2");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(wrapper);
+//
+//        Map<Long, Long> amountMap = new LinkedHashMap<>();
+//        Map<Long, String> nameMap = new LinkedHashMap<>();
+//
+//        for (BizBill bill : bills) {
+//            Long cid = bill.getCategoryId();
+//            if (cid != null) {
+//                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+//                if (!nameMap.containsKey(cid)) {
+//                    BizCategory cat = categoryMapper.selectById(cid);
+//                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+//                }
+//            }
+//        }
+//
+//        return amountMap.entrySet().stream()
+//                .map(e -> new TrendItemVo(nameMap.getOrDefault(e.getKey(), "未知"), e.getValue()))
+//                .collect(Collectors.toList());
+//    }
+//
+//    @Override
+//    public ReviewerStatsVo getReviewerStats() {
+//        String username = SecurityUtils.getUsername();
+//        ReviewerStatsVo vo = new ReviewerStatsVo();
+//
+//        // 待审核数量
+//        vo.setPendingCount((int) this.count(
+//                new LambdaQueryWrapper<BizBill>().eq(BizBill::getStatus, "1")));
+//
+//        // 今日通过/退回
+//        String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+//        int todayApproved = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "2")
+//                        .ge(BizBill::getAuditTime, today));
+//        int todayRejected = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "3")
+//                        .ge(BizBill::getAuditTime, today));
+//        vo.setTodayApproved(todayApproved);
+//        vo.setTodayRejected(todayRejected);
+//
+//        // 通过率
+//        int totalReviewed = todayApproved + todayRejected;
+//        vo.setApprovalRate(totalReviewed > 0
+//                ? Math.round(todayApproved * 100.0 / totalReviewed) : 0);
+//
+//        // 积压预警: 超过3天未审核
+//        Calendar cal = Calendar.getInstance();
+//        cal.add(Calendar.DAY_OF_MONTH, -3);
+//        vo.setStalePending((int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getStatus, "1")
+//                        .lt(BizBill::getCreateTime, cal.getTime())));
+//
+//        // 最近审核记录
+//        List<BizBill> recentBills = this.list(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .in(BizBill::getStatus, "2", "3")
+//                        .orderByDesc(BizBill::getAuditTime)
+//                        .last("LIMIT 5"));
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(recentBills);
+//        vo.setRecentReviews(recentBills.stream().map(bill -> {
+//            BizBillVo billVo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, billVo);
+//            if (bill.getCategoryId() != null) {
+//                billVo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return billVo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    @Override
+//    public UserBillStatsVo getUserBillStats() {
+//        String username = SecurityUtils.getUsername();
+//
+//        // 查询当前用户的所有票据
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getCreateBy, username);
+//        List<BizBill> allBills = this.list(wrapper);
+//
+//        // 统计各状态数量
+//        long draftCount = allBills.stream().filter(b -> "0".equals(b.getStatus())).count();
+//        long submittedCount = allBills.stream().filter(b -> "1".equals(b.getStatus())).count();
+//        long approvedCount = allBills.stream().filter(b -> "2".equals(b.getStatus())).count();
+//        long rejectedCount = allBills.stream().filter(b -> "3".equals(b.getStatus())).count();
+//
+//        // 计算已通过票据的总金额
+//        java.math.BigDecimal totalAmount = allBills.stream()
+//                .filter(b -> "2".equals(b.getStatus()))
+//                .map(BizBill::getAmount)
+//                .filter(amount -> amount != null)
+//                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+//
+//        return UserBillStatsVo.builder()
+//                .totalCount((long) allBills.size())
+//                .draftCount(draftCount)
+//                .submittedCount(submittedCount)
+//                .approvedCount(approvedCount)
+//                .rejectedCount(rejectedCount)
+//                .totalAmount(totalAmount.setScale(2, java.math.RoundingMode.HALF_UP).toString())
+//                .build();
+//    }
+//
+//}
+//package com.zsc.module.service.impl;
+//
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+//import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+//import com.zsc.common.utils.SecurityUtils;
+//import com.zsc.module.common.exception.ServiceException;
+//import com.zsc.module.common.pagination.PageResult;
+//import com.zsc.module.domain.dto.BizBillDto;
+//import com.zsc.module.domain.dto.BizBillReviewDto;
+//import com.zsc.module.domain.dto.query.BizBillQueryDto;
+//import com.zsc.module.domain.entity.BizAuditLog;
+//import com.zsc.module.domain.entity.BizBill;
+//import com.zsc.module.domain.entity.BizBillFile;
+//import com.zsc.module.domain.entity.BizCategory;
+//import com.zsc.module.domain.vo.BizAuditLogVo;
+//import com.zsc.module.domain.vo.BizBillDetailVo;
+//import com.zsc.module.domain.vo.BizBillFileVo;
+//import com.zsc.module.domain.vo.BizBillVo;
+//import com.zsc.module.domain.vo.ReviewerStatsVo;
+//import com.zsc.module.domain.vo.TrendItemVo;
+//import com.zsc.module.domain.vo.UserBillStatsVo;
+//import com.zsc.module.mapper.BizAuditLogMapper;
+//import com.zsc.module.mapper.BizBillFileMapper;
+//import com.zsc.module.mapper.BizBillMapper;
+//import com.zsc.module.mapper.BizCategoryMapper;
+//import com.zsc.module.service.BizBillService;
+//import org.apache.commons.lang3.StringUtils;
+//import org.springframework.beans.BeanUtils;
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//
+//import java.text.SimpleDateFormat;
+//import java.util.Calendar;
+//import java.util.ArrayList;
+//import java.util.Date;
+//import java.util.LinkedHashMap;
+//import java.util.List;
+//import java.util.Map;
+//import java.util.stream.Collectors;
+//
+///**
+// * 票据表 服务实现类
+// */
+//@Service
+//@Transactional
+//public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> implements BizBillService {
+//
+//    @Autowired
+//    private BizBillFileMapper fileMapper;
+//
+//    @Autowired
+//    private BizAuditLogMapper auditLogMapper;
+//
+//    @Autowired
+//    private BizCategoryMapper categoryMapper;
+//
+//    /**
+//     * 管理员禁止执行用户专属操作
+//     */
+//    private void checkNotAdmin() {
+//        if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            throw new ServiceException("管理员不能执行用户操作！");
+//        }
+//    }
+//
+//    // ==================== 新增 ====================
+//
+//    @Override
+//    public void addBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = new BizBill();
+//        BeanUtils.copyProperties(dto, bill);
+//
+//        bill.setCreateBy(SecurityUtils.getUsername());
+//        bill.setCreateTime(new Date());
+//
+//        // 先保存草稿（用临时编号占位），再根据状态替换为正式编号
+//        bill.setBillNo("DRAFT-" + System.currentTimeMillis());
+//
+//        if (!this.save(bill)) {
+//            throw new ServiceException("系统错误，票据保存失败！");
+//        }
+//
+//        if ("1".equals(dto.getStatus())) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//            this.updateById(bill);
+//        }
+//
+//        // 保存附件记录
+//        saveAttachments(bill.getId(), dto.getAttachment());
+//    }
+//
+//    // ==================== 查询列表 ====================
+//
+//    @Override
+//    public PageResult<BizBillVo> queryBills(BizBillQueryDto dto) {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<>();
+//
+//        // 普通用户只查自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//
+//        // 条件过滤
+//        if (StringUtils.isNotBlank(dto.getKeywords())) {
+//            wrapper.and(w -> w
+//                    .like(BizBill::getTitle, dto.getKeywords())
+//                    .or()
+//                    .like(BizBill::getBillNo, dto.getKeywords())
+//            );
+//        }
+//        wrapper.eq(dto.getCategoryId() != null, BizBill::getCategoryId, dto.getCategoryId())
+//                .eq(StringUtils.isNotBlank(dto.getStatus()), BizBill::getStatus, dto.getStatus())
+//                .like(StringUtils.isNotBlank(dto.getAuditBy()), BizBill::getAuditBy, dto.getAuditBy())
+//                .like(StringUtils.isNotBlank(dto.getCreateBy()), BizBill::getCreateBy, dto.getCreateBy())
+//                .ge(dto.getMinAmount() != null, BizBill::getAmount, dto.getMinAmount())
+//                .le(dto.getMaxAmount() != null, BizBill::getAmount, dto.getMaxAmount())
+//                .ge(StringUtils.isNotBlank(dto.getStartTime()), BizBill::getCreateTime, dto.getStartTime())
+//                .le(StringUtils.isNotBlank(dto.getEndTime()), BizBill::getCreateTime, dto.getEndTime())
+//                .last(buildOrderSql(dto.getSortField(), dto.getSortOrder()));
+//
+//        Page<BizBill> page = this.page(dto.convertToPage(), wrapper);
+//
+//        // 批量查类别名称
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(page.getRecords());
+//
+//        // Entity → VO
+//        List<BizBillVo> voList = page.getRecords().stream().map(bill -> {
+//            BizBillVo vo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, vo);
+//            if (bill.getCategoryId() != null) {
+//                vo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return vo;
+//        }).collect(Collectors.toList());
+//
+//        PageResult result = PageResult.fromPage(page);
+//        result.setList(voList);
+//        return result;
+//    }
+//
+//    // ==================== 详情 ====================
+//
+//    @Override
+//    public BizBillDetailVo getBillDetail(Long id) {
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 非管理员只能查看自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")
+//                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能查看自己的票据！");
+//        }
+//
+//        BizBillDetailVo vo = new BizBillDetailVo();
+//        BeanUtils.copyProperties(bill, vo);
+//
+//        // 设置状态文本
+//        vo.setStatusText(getStatusText(bill.getStatus()));
+//
+//        // 查类别名称
+//        if (bill.getCategoryId() != null) {
+//            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//            if (category != null) {
+//                vo.setCategoryName(category.getCategoryName());
+//            }
+//        }
+//
+//        // 查附件列表
+//        List<BizBillFile> files = fileMapper.selectList(
+//                new LambdaQueryWrapper<BizBillFile>()
+//                        .eq(BizBillFile::getBillId, id)
+//                        .orderByAsc(BizBillFile::getSortOrder)
+//        );
+//        vo.setFiles(files.stream().map(f -> {
+//            BizBillFileVo fvo = new BizBillFileVo();
+//            BeanUtils.copyProperties(f, fvo);
+//            // 生成预览和下载URL
+//            fvo.setPreviewUrl("/api/bill/preview/" + f.getId());
+//            fvo.setDownloadUrl("/api/bill/download/" + f.getId());
+//            return fvo;
+//        }).collect(Collectors.toList()));
+//
+//        // 查审核历史
+//        List<BizAuditLog> logs = auditLogMapper.selectList(
+//                new LambdaQueryWrapper<BizAuditLog>()
+//                        .eq(BizAuditLog::getBillId, id)
+//                        .orderByDesc(BizAuditLog::getAuditTime)
+//        );
+//        vo.setAuditLogs(logs.stream().map(l -> {
+//            BizAuditLogVo lvo = new BizAuditLogVo();
+//            BeanUtils.copyProperties(l, lvo);
+//            // 设置操作文本
+//            lvo.setActionText("1".equals(l.getAction()) ? "通过" : "退回");
+//            return lvo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    // ==================== 编辑 ====================
+//
+//    @Override
+//    public void updateBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(dto.getId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可编辑
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能编辑草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能编辑自己的票据！");
+//        }
+//
+//        // 保留字段不被 null 覆盖
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            bill.setAttachment(dto.getAttachment());
+//        }
+//
+//        bill.setTitle(dto.getTitle());
+//        bill.setCategoryId(dto.getCategoryId());
+//        bill.setAmount(dto.getAmount());
+//        bill.setDescription(dto.getDescription());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据更新失败！");
+//        }
+//
+//        // 仅当传入了新附件时才替换旧附件
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                    .eq(BizBillFile::getBillId, bill.getId()));
+//            saveAttachments(bill.getId(), dto.getAttachment());
+//        }
+//    }
+//
+//    // ==================== 提交审核 ====================
+//
+//    @Override
+//    public void submitBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可提交
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能提交草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能提交自己的票据！");
+//        }
+//
+//        // 草稿有临时编号的，替换为正式编号（用主键ID保证并发唯一）
+//        if (StringUtils.isBlank(bill.getBillNo()) || bill.getBillNo().startsWith("DRAFT-")) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//        }
+//
+//        bill.setStatus("1");
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据提交失败！");
+//        }
+//    }
+//
+//    // ==================== 删除 ====================
+//
+//    @Override
+//    public void deleteBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿可删除
+//        if (!"0".equals(bill.getStatus())) {
+//            throw new ServiceException("只能删除草稿状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能删除自己的票据！");
+//        }
+//
+//        // 先删附件，再删票据
+//        fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                .eq(BizBillFile::getBillId, id));
+//        this.removeById(id);
+//    }
+//
+//    // ==================== 审核 ====================
+//
+//    @Override
+//    public void reviewBill(BizBillReviewDto dto) {
+//        // 校验 action 值合法性
+//        if (!List.of("1", "2").contains(dto.getAction())) {
+//            throw new ServiceException("无效的审核结果，action 必须为 1（通过）或 2（退回）！");
+//        }
+//
+//        BizBill bill = this.getById(dto.getBillId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅已提交状态可审核
+//        if (!"1".equals(bill.getStatus())) {
+//            throw new ServiceException("只能审核已提交状态的票据！");
+//        }
+//
+//        // 更新票据审核信息
+//        bill.setStatus(dto.getAction().equals("1") ? "2" : "3");
+//        bill.setAuditBy(SecurityUtils.getUsername());
+//        bill.setAuditTime(new Date());
+//        bill.setAuditComment(dto.getComment());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，审核失败！");
+//        }
+//
+//        // 记录审核历史
+//        BizAuditLog log = BizAuditLog.builder()
+//                .billId(dto.getBillId())
+//                .action(dto.getAction())
+//                .comment(dto.getComment())
+//                .auditBy(SecurityUtils.getUsername())
+//                .auditTime(new Date())
+//                .build();
+//        auditLogMapper.insert(log);
+//    }
+//
+//    // ==================== 附件 ====================
+//
+//    /**
+//     * 解析附件路径字符串，创建附件记录
+//     * @param billId 票据ID
+//     * @param attachment 逗号分隔的附件路径
+//     */
+//    private void saveAttachments(Long billId, String attachment) {
+//        if (StringUtils.isBlank(attachment)) {
+//            return;
+//        }
+//
+//        String[] paths = attachment.split(",");
+//        for (int i = 0; i < paths.length; i++) {
+//            String path = paths[i].trim();
+//            if (StringUtils.isBlank(path)) {
+//                continue;
+//            }
+//
+//            BizBillFile file = BizBillFile.builder()
+//                    .billId(billId)
+//                    .fileName(path.substring(path.lastIndexOf("/") + 1))
+//                    .filePath(path)
+//                    .sortOrder(i)
+//                    .createBy(SecurityUtils.getUsername())
+//                    .createTime(new Date())
+//                    .build();
+//            fileMapper.insert(file);
+//        }
+//    }
+//
+//    // ==================== 工具方法 ====================
+//
+//    /**
+//     * 批量查询类别ID对应的类别名称
+//     */
+//    private String buildOrderSql(String sortField, String sortOrder) {
+//        if (sortField == null || sortField.isEmpty()) return "ORDER BY create_time DESC";
+//        String col = switch (sortField) {
+//            case "amount" -> "amount";
+//            case "createTime" -> "create_time";
+//            case "auditTime" -> "audit_time";
+//            default -> "create_time";
+//        };
+//        String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+//        return "ORDER BY " + col + " " + dir;
+//    }
+//
+//    private Map<Long, String> buildCategoryNameMap(List<BizBill> bills) {
+//        List<Long> categoryIds = bills.stream()
+//                .map(BizBill::getCategoryId)
+//                .filter(id -> id != null)
+//                .distinct()
+//                .collect(Collectors.toList());
+//
+//        if (categoryIds.isEmpty()) {
+//            return new java.util.HashMap<>();
+//        }
+//
+//        List<BizCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+//        return categories.stream()
+//                .collect(Collectors.toMap(BizCategory::getCategoryId, BizCategory::getCategoryName, (a, b) -> a, java.util.HashMap::new));
+//    }
+//
+//    /**
+//     * 生成票据编号: BILL-yyyyMMdd-{billId}
+//     * 使用票据主键ID保证并发安全，避免批量提交时编号重复
+//     */
+//    private String generateBillNo(Long billId) {
+//        String dateStr = new SimpleDateFormat("yyyyMMdd").format(new Date());
+//        return String.format("BILL-%s-%04d", dateStr, billId);
+//    }
+//
+//    /**
+//     * 获取状态文本
+//     */
+//    private String getStatusText(String status) {
+//        if (status == null) return "未知";
+//        switch (status) {
+//            case "0": return "草稿";
+//            case "1": return "已提交";
+//            case "2": return "已通过";
+//            case "3": return "已退回";
+//            default: return "未知";
+//        }
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getMonthlyTrend() {
+//        Calendar now = Calendar.getInstance();
+//        int year = now.get(Calendar.YEAR);
+//        int month = now.get(Calendar.MONTH) + 1;
+//
+//        Calendar start = Calendar.getInstance();
+//        start.set(year, month - 1, 1, 0, 0, 0);
+//        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+//        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+//
+//        LambdaQueryWrapper<BizBill> trendWrapper = new LambdaQueryWrapper<BizBill>()
+//                .ge(BizBill::getUpdateTime, startStr)
+//                .le(BizBill::getUpdateTime, endStr)
+//                .ne(BizBill::getStatus, "0");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            trendWrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            trendWrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(trendWrapper);
+//
+//        Map<String, Long> weekMap = new LinkedHashMap<>();
+//        for (int i = 1; i <= 4; i++) {
+//            weekMap.put("第" + i + "周", 0L);
+//        }
+//
+//        for (BizBill bill : bills) {
+//            Calendar cal = Calendar.getInstance();
+//            cal.setTime(bill.getUpdateTime());
+//            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+//            String weekLabel = "第" + ((dayOfMonth - 1) / 7 + 1) + "周";
+//            weekMap.merge(weekLabel, 1L, Long::sum);
+//        }
+//
+//        List<TrendItemVo> result = new ArrayList<>();
+//        weekMap.forEach((label, count) -> result.add(new TrendItemVo(label, count)));
+//        return result;
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getCategoryAmountSummary() {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getStatus, "2");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(wrapper);
+//
+//        Map<Long, Long> amountMap = new LinkedHashMap<>();
+//        Map<Long, String> nameMap = new LinkedHashMap<>();
+//
+//        for (BizBill bill : bills) {
+//            Long cid = bill.getCategoryId();
+//            if (cid != null) {
+//                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+//                if (!nameMap.containsKey(cid)) {
+//                    BizCategory cat = categoryMapper.selectById(cid);
+//                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+//                }
+//            }
+//        }
+//
+//        return amountMap.entrySet().stream()
+//                .map(e -> new TrendItemVo(nameMap.getOrDefault(e.getKey(), "未知"), e.getValue()))
+//                .collect(Collectors.toList());
+//    }
+//
+//    @Override
+//    public ReviewerStatsVo getReviewerStats() {
+//        String username = SecurityUtils.getUsername();
+//        ReviewerStatsVo vo = new ReviewerStatsVo();
+//
+//        // 待审核数量
+//        vo.setPendingCount((int) this.count(
+//                new LambdaQueryWrapper<BizBill>().eq(BizBill::getStatus, "1")));
+//
+//        // 今日通过/退回
+//        String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+//        int todayApproved = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "2")
+//                        .ge(BizBill::getAuditTime, today));
+//        int todayRejected = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "3")
+//                        .ge(BizBill::getAuditTime, today));
+//        vo.setTodayApproved(todayApproved);
+//        vo.setTodayRejected(todayRejected);
+//
+//        // 通过率
+//        int totalReviewed = todayApproved + todayRejected;
+//        vo.setApprovalRate(totalReviewed > 0
+//                ? Math.round(todayApproved * 100.0 / totalReviewed) : 0);
+//
+//        // 积压预警: 超过3天未审核
+//        Calendar cal = Calendar.getInstance();
+//        cal.add(Calendar.DAY_OF_MONTH, -3);
+//        vo.setStalePending((int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getStatus, "1")
+//                        .lt(BizBill::getCreateTime, cal.getTime())));
+//
+//        // 最近审核记录
+//        List<BizBill> recentBills = this.list(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .in(BizBill::getStatus, "2", "3")
+//                        .orderByDesc(BizBill::getAuditTime)
+//                        .last("LIMIT 5"));
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(recentBills);
+//        vo.setRecentReviews(recentBills.stream().map(bill -> {
+//            BizBillVo billVo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, billVo);
+//            if (bill.getCategoryId() != null) {
+//                billVo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return billVo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    @Override
+//    public UserBillStatsVo getUserBillStats() {
+//        String username = SecurityUtils.getUsername();
+//
+//        // 查询当前用户的所有票据
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getCreateBy, username);
+//        List<BizBill> allBills = this.list(wrapper);
+//
+//        // 统计各状态数量
+//        long draftCount = allBills.stream().filter(b -> "0".equals(b.getStatus())).count();
+//        long submittedCount = allBills.stream().filter(b -> "1".equals(b.getStatus())).count();
+//        long approvedCount = allBills.stream().filter(b -> "2".equals(b.getStatus())).count();
+//        long rejectedCount = allBills.stream().filter(b -> "3".equals(b.getStatus())).count();
+//
+//        // 计算已通过票据的总金额
+//        java.math.BigDecimal totalAmount = allBills.stream()
+//                .filter(b -> "2".equals(b.getStatus()))
+//                .map(BizBill::getAmount)
+//                .filter(amount -> amount != null)
+//                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+//
+//        return UserBillStatsVo.builder()
+//                .totalCount((long) allBills.size())
+//                .draftCount(draftCount)
+//                .submittedCount(submittedCount)
+//                .approvedCount(approvedCount)
+//                .rejectedCount(rejectedCount)
+//                .totalAmount(totalAmount.setScale(2, java.math.RoundingMode.HALF_UP).toString())
+//                .build();
+//    }
+//
+//}
+//package com.zsc.module.service.impl;
+//
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+//import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+//import com.zsc.common.utils.SecurityUtils;
+//import com.zsc.module.common.exception.ServiceException;
+//import com.zsc.module.common.pagination.PageResult;
+//import com.zsc.module.domain.dto.BizBillDto;
+//import com.zsc.module.domain.dto.BizBillReviewDto;
+//import com.zsc.module.domain.dto.query.BizBillQueryDto;
+//import com.zsc.module.domain.entity.BizAuditLog;
+//import com.zsc.module.domain.entity.BizBill;
+//import com.zsc.module.domain.entity.BizBillFile;
+//import com.zsc.module.domain.entity.BizCategory;
+//import com.zsc.module.domain.vo.BizAuditLogVo;
+//import com.zsc.module.domain.vo.BizBillDetailVo;
+//import com.zsc.module.domain.vo.BizBillFileVo;
+//import com.zsc.module.domain.vo.BizBillVo;
+//import com.zsc.module.domain.vo.ReviewerStatsVo;
+//import com.zsc.module.domain.vo.TrendItemVo;
+//import com.zsc.module.domain.vo.UserBillStatsVo;
+//import com.zsc.module.mapper.BizAuditLogMapper;
+//import com.zsc.module.mapper.BizBillFileMapper;
+//import com.zsc.module.mapper.BizBillMapper;
+//import com.zsc.module.mapper.BizCategoryMapper;
+//import com.zsc.module.service.BizBillService;
+//import org.apache.commons.lang3.StringUtils;
+//import org.springframework.beans.BeanUtils;
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//
+//import java.text.SimpleDateFormat;
+//import java.util.Calendar;
+//import java.util.ArrayList;
+//import java.util.Date;
+//import java.util.LinkedHashMap;
+//import java.util.List;
+//import java.util.Map;
+//import java.util.stream.Collectors;
+//
+///**
+// * 票据表 服务实现类
+// */
+//@Service
+//@Transactional
+//public class BizBillServiceImpl extends ServiceImpl<BizBillMapper, BizBill> implements BizBillService {
+//
+//    @Autowired
+//    private BizBillFileMapper fileMapper;
+//
+//    @Autowired
+//    private BizAuditLogMapper auditLogMapper;
+//
+//    @Autowired
+//    private BizCategoryMapper categoryMapper;
+//
+//    /**
+//     * 管理员禁止执行用户专属操作
+//     */
+//    private void checkNotAdmin() {
+//        if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            throw new ServiceException("管理员不能执行用户操作！");
+//        }
+//    }
+//
+//    // ==================== 新增 ====================
+//
+//    @Override
+//    public void addBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = new BizBill();
+//        BeanUtils.copyProperties(dto, bill);
+//
+//        bill.setCreateBy(SecurityUtils.getUsername());
+//        bill.setCreateTime(new Date());
+//
+//        // 先保存草稿（用临时编号占位），再根据状态替换为正式编号
+//        bill.setBillNo("DRAFT-" + System.currentTimeMillis());
+//
+//        if (!this.save(bill)) {
+//            throw new ServiceException("系统错误，票据保存失败！");
+//        }
+//
+//        if ("1".equals(dto.getStatus())) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//            this.updateById(bill);
+//        }
+//
+//        // 保存附件记录
+//        saveAttachments(bill.getId(), dto.getAttachment());
+//    }
+//
+//    // ==================== 查询列表 ====================
+//
+//    @Override
+//    public PageResult<BizBillVo> queryBills(BizBillQueryDto dto) {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<>();
+//
+//        // 普通用户只查自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//
+//        // 条件过滤
+//        if (StringUtils.isNotBlank(dto.getKeywords())) {
+//            wrapper.and(w -> w
+//                    .like(BizBill::getTitle, dto.getKeywords())
+//                    .or()
+//                    .like(BizBill::getBillNo, dto.getKeywords())
+//            );
+//        }
+//        wrapper.eq(dto.getCategoryId() != null, BizBill::getCategoryId, dto.getCategoryId())
+//                .eq(StringUtils.isNotBlank(dto.getStatus()), BizBill::getStatus, dto.getStatus())
+//                .like(StringUtils.isNotBlank(dto.getAuditBy()), BizBill::getAuditBy, dto.getAuditBy())
+//                .like(StringUtils.isNotBlank(dto.getCreateBy()), BizBill::getCreateBy, dto.getCreateBy())
+//                .ge(dto.getMinAmount() != null, BizBill::getAmount, dto.getMinAmount())
+//                .le(dto.getMaxAmount() != null, BizBill::getAmount, dto.getMaxAmount())
+//                .ge(StringUtils.isNotBlank(dto.getStartTime()), BizBill::getCreateTime, dto.getStartTime())
+//                .le(StringUtils.isNotBlank(dto.getEndTime()), BizBill::getCreateTime, dto.getEndTime())
+//                .last(buildOrderSql(dto.getSortField(), dto.getSortOrder()));
+//
+//        Page<BizBill> page = this.page(dto.convertToPage(), wrapper);
+//
+//        // 批量查类别名称
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(page.getRecords());
+//
+//        // Entity → VO
+//        List<BizBillVo> voList = page.getRecords().stream().map(bill -> {
+//            BizBillVo vo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, vo);
+//            if (bill.getCategoryId() != null) {
+//                vo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return vo;
+//        }).collect(Collectors.toList());
+//
+//        PageResult result = PageResult.fromPage(page);
+//        result.setList(voList);
+//        return result;
+//    }
+//
+//    // ==================== 详情 ====================
+//
+//    @Override
+//    public BizBillDetailVo getBillDetail(Long id) {
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 非管理员只能查看自己的票据
+//        if (!SecurityUtils.hasPermi("biz:bill:review")
+//                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能查看自己的票据！");
+//        }
+//
+//        BizBillDetailVo vo = new BizBillDetailVo();
+//        BeanUtils.copyProperties(bill, vo);
+//
+//        // 设置状态文本
+//        vo.setStatusText(getStatusText(bill.getStatus()));
+//
+//        // 查类别名称
+//        if (bill.getCategoryId() != null) {
+//            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//            if (category != null) {
+//                vo.setCategoryName(category.getCategoryName());
+//            }
+//        }
+//
+//        // 查附件列表
+//        List<BizBillFile> files = fileMapper.selectList(
+//                new LambdaQueryWrapper<BizBillFile>()
+//                        .eq(BizBillFile::getBillId, id)
+//                        .orderByAsc(BizBillFile::getSortOrder)
+//        );
+//        vo.setFiles(files.stream().map(f -> {
+//            BizBillFileVo fvo = new BizBillFileVo();
+//            BeanUtils.copyProperties(f, fvo);
+//            // 生成预览和下载URL
+//            fvo.setPreviewUrl("/api/bill/preview/" + f.getId());
+//            fvo.setDownloadUrl("/api/bill/download/" + f.getId());
+//            return fvo;
+//        }).collect(Collectors.toList()));
+//
+//        // 查审核历史
+//        List<BizAuditLog> logs = auditLogMapper.selectList(
+//                new LambdaQueryWrapper<BizAuditLog>()
+//                        .eq(BizAuditLog::getBillId, id)
+//                        .orderByDesc(BizAuditLog::getAuditTime)
+//        );
+//        vo.setAuditLogs(logs.stream().map(l -> {
+//            BizAuditLogVo lvo = new BizAuditLogVo();
+//            BeanUtils.copyProperties(l, lvo);
+//            // 设置操作文本
+//            lvo.setActionText("1".equals(l.getAction()) ? "通过" : "退回");
+//            return lvo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    // ==================== 编辑 ====================
+//
+//    @Override
+//    public void updateBill(BizBillDto dto) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(dto.getId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可编辑
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能编辑草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能编辑自己的票据！");
+//        }
+//
+//        // 保留字段不被 null 覆盖
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            bill.setAttachment(dto.getAttachment());
+//        }
+//
+//        bill.setTitle(dto.getTitle());
+//        bill.setCategoryId(dto.getCategoryId());
+//        bill.setAmount(dto.getAmount());
+//        bill.setDescription(dto.getDescription());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据更新失败！");
+//        }
+//
+//        // 仅当传入了新附件时才替换旧附件
+//        if (StringUtils.isNotBlank(dto.getAttachment())) {
+//            fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                    .eq(BizBillFile::getBillId, bill.getId()));
+//            saveAttachments(bill.getId(), dto.getAttachment());
+//        }
+//    }
+//
+//    // ==================== 提交审核 ====================
+//
+//    @Override
+//    public void submitBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿或已退回可提交
+//        if (!List.of("0", "3").contains(bill.getStatus())) {
+//            throw new ServiceException("只能提交草稿或已退回状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能提交自己的票据！");
+//        }
+//
+//        // 草稿有临时编号的，替换为正式编号（用主键ID保证并发唯一）
+//        if (StringUtils.isBlank(bill.getBillNo()) || bill.getBillNo().startsWith("DRAFT-")) {
+//            bill.setBillNo(generateBillNo(bill.getId()));
+//        }
+//
+//        bill.setStatus("1");
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，票据提交失败！");
+//        }
+//    }
+//
+//    // ==================== 删除 ====================
+//
+//    @Override
+//    public void deleteBill(Long id) {
+//        checkNotAdmin();
+//        BizBill bill = this.getById(id);
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅草稿可删除
+//        if (!"0".equals(bill.getStatus())) {
+//            throw new ServiceException("只能删除草稿状态的票据！");
+//        }
+//
+//        // 校验数据归属
+//        if (!SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            throw new ServiceException("只能删除自己的票据！");
+//        }
+//
+//        // 先删附件，再删票据
+//        fileMapper.delete(new LambdaQueryWrapper<BizBillFile>()
+//                .eq(BizBillFile::getBillId, id));
+//        this.removeById(id);
+//    }
+//
+//    // ==================== 审核 ====================
+//
+//    @Override
+//    public void reviewBill(BizBillReviewDto dto) {
+//        // 校验 action 值合法性
+//        if (!List.of("1", "2").contains(dto.getAction())) {
+//            throw new ServiceException("无效的审核结果，action 必须为 1（通过）或 2（退回）！");
+//        }
+//
+//        BizBill bill = this.getById(dto.getBillId());
+//        if (bill == null) {
+//            throw new ServiceException("票据不存在！");
+//        }
+//
+//        // 仅已提交状态可审核
+//        if (!"1".equals(bill.getStatus())) {
+//            throw new ServiceException("只能审核已提交状态的票据！");
+//        }
+//
+//        // 更新票据审核信息
+//        bill.setStatus(dto.getAction().equals("1") ? "2" : "3");
+//        bill.setAuditBy(SecurityUtils.getUsername());
+//        bill.setAuditTime(new Date());
+//        bill.setAuditComment(dto.getComment());
+//        bill.setUpdateBy(SecurityUtils.getUsername());
+//        bill.setUpdateTime(new Date());
+//
+//        if (!this.updateById(bill)) {
+//            throw new ServiceException("系统错误，审核失败！");
+//        }
+//
+//        // 记录审核历史
+//        BizAuditLog log = BizAuditLog.builder()
+//                .billId(dto.getBillId())
+//                .action(dto.getAction())
+//                .comment(dto.getComment())
+//                .auditBy(SecurityUtils.getUsername())
+//                .auditTime(new Date())
+//                .build();
+//        auditLogMapper.insert(log);
+//    }
+//
+//    // ==================== 附件 ====================
+//
+//    /**
+//     * 解析附件路径字符串，创建附件记录
+//     * @param billId 票据ID
+//     * @param attachment 逗号分隔的附件路径
+//     */
+//    private void saveAttachments(Long billId, String attachment) {
+//        if (StringUtils.isBlank(attachment)) {
+//            return;
+//        }
+//
+//        String[] paths = attachment.split(",");
+//        for (int i = 0; i < paths.length; i++) {
+//            String path = paths[i].trim();
+//            if (StringUtils.isBlank(path)) {
+//                continue;
+//            }
+//
+//            BizBillFile file = BizBillFile.builder()
+//                    .billId(billId)
+//                    .fileName(path.substring(path.lastIndexOf("/") + 1))
+//                    .filePath(path)
+//                    .sortOrder(i)
+//                    .createBy(SecurityUtils.getUsername())
+//                    .createTime(new Date())
+//                    .build();
+//            fileMapper.insert(file);
+//        }
+//    }
+//
+//    // ==================== 工具方法 ====================
+//
+//    /**
+//     * 批量查询类别ID对应的类别名称
+//     */
+//    private String buildOrderSql(String sortField, String sortOrder) {
+//        if (sortField == null || sortField.isEmpty()) return "ORDER BY create_time DESC";
+//        String col = switch (sortField) {
+//            case "amount" -> "amount";
+//            case "createTime" -> "create_time";
+//            case "auditTime" -> "audit_time";
+//            default -> "create_time";
+//        };
+//        String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+//        return "ORDER BY " + col + " " + dir;
+//    }
+//
+//    private Map<Long, String> buildCategoryNameMap(List<BizBill> bills) {
+//        List<Long> categoryIds = bills.stream()
+//                .map(BizBill::getCategoryId)
+//                .filter(id -> id != null)
+//                .distinct()
+//                .collect(Collectors.toList());
+//
+//        if (categoryIds.isEmpty()) {
+//            return new java.util.HashMap<>();
+//        }
+//
+//        List<BizCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+//        return categories.stream()
+//                .collect(Collectors.toMap(BizCategory::getCategoryId, BizCategory::getCategoryName, (a, b) -> a, java.util.HashMap::new));
+//    }
+//
+//    /**
+//     * 生成票据编号: BILL-yyyyMMdd-{billId}
+//     * 使用票据主键ID保证并发安全，避免批量提交时编号重复
+//     */
+//    private String generateBillNo(Long billId) {
+//        String dateStr = new SimpleDateFormat("yyyyMMdd").format(new Date());
+//        return String.format("BILL-%s-%04d", dateStr, billId);
+//    }
+//
+//    /**
+//     * 获取状态文本
+//     */
+//    private String getStatusText(String status) {
+//        if (status == null) return "未知";
+//        switch (status) {
+//            case "0": return "草稿";
+//            case "1": return "已提交";
+//            case "2": return "已通过";
+//            case "3": return "已退回";
+//            default: return "未知";
+//        }
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getMonthlyTrend() {
+//        Calendar now = Calendar.getInstance();
+//        int year = now.get(Calendar.YEAR);
+//        int month = now.get(Calendar.MONTH) + 1;
+//
+//        Calendar start = Calendar.getInstance();
+//        start.set(year, month - 1, 1, 0, 0, 0);
+//        String startStr = new SimpleDateFormat("yyyy-MM-dd").format(start.getTime());
+//        String endStr = new SimpleDateFormat("yyyy-MM-dd").format(now.getTime());
+//
+//        LambdaQueryWrapper<BizBill> trendWrapper = new LambdaQueryWrapper<BizBill>()
+//                .ge(BizBill::getUpdateTime, startStr)
+//                .le(BizBill::getUpdateTime, endStr)
+//                .ne(BizBill::getStatus, "0");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            trendWrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            trendWrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(trendWrapper);
+//
+//        Map<String, Long> weekMap = new LinkedHashMap<>();
+//        for (int i = 1; i <= 4; i++) {
+//            weekMap.put("第" + i + "周", 0L);
+//        }
+//
+//        for (BizBill bill : bills) {
+//            Calendar cal = Calendar.getInstance();
+//            cal.setTime(bill.getUpdateTime());
+//            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+//            String weekLabel = "第" + ((dayOfMonth - 1) / 7 + 1) + "周";
+//            weekMap.merge(weekLabel, 1L, Long::sum);
+//        }
+//
+//        List<TrendItemVo> result = new ArrayList<>();
+//        weekMap.forEach((label, count) -> result.add(new TrendItemVo(label, count)));
+//        return result;
+//    }
+//
+//    @Override
+//    public List<TrendItemVo> getCategoryAmountSummary() {
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getStatus, "2");
+//        if (SecurityUtils.hasPermi("*:*:*")) {
+//            // 超管看全量
+//        } else if (SecurityUtils.hasPermi("biz:bill:review")) {
+//            wrapper.eq(BizBill::getAuditBy, SecurityUtils.getUsername());
+//        } else {
+//            wrapper.eq(BizBill::getCreateBy, SecurityUtils.getUsername());
+//        }
+//        List<BizBill> bills = this.list(wrapper);
+//
+//        Map<Long, Long> amountMap = new LinkedHashMap<>();
+//        Map<Long, String> nameMap = new LinkedHashMap<>();
+//
+//        for (BizBill bill : bills) {
+//            Long cid = bill.getCategoryId();
+//            if (cid != null) {
+//                amountMap.merge(cid, bill.getAmount() != null ? bill.getAmount().longValue() : 0L, Long::sum);
+//                if (!nameMap.containsKey(cid)) {
+//                    BizCategory cat = categoryMapper.selectById(cid);
+//                    nameMap.put(cid, cat != null ? cat.getCategoryName() : "未知");
+//                }
+//            }
+//        }
+//
+//        return amountMap.entrySet().stream()
+//                .map(e -> new TrendItemVo(nameMap.getOrDefault(e.getKey(), "未知"), e.getValue()))
+//                .collect(Collectors.toList());
+//    }
+//
+//    @Override
+//    public ReviewerStatsVo getReviewerStats() {
+//        String username = SecurityUtils.getUsername();
+//        ReviewerStatsVo vo = new ReviewerStatsVo();
+//
+//        // 待审核数量
+//        vo.setPendingCount((int) this.count(
+//                new LambdaQueryWrapper<BizBill>().eq(BizBill::getStatus, "1")));
+//
+//        // 今日通过/退回
+//        String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+//        int todayApproved = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "2")
+//                        .ge(BizBill::getAuditTime, today));
+//        int todayRejected = (int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .eq(BizBill::getStatus, "3")
+//                        .ge(BizBill::getAuditTime, today));
+//        vo.setTodayApproved(todayApproved);
+//        vo.setTodayRejected(todayRejected);
+//
+//        // 通过率
+//        int totalReviewed = todayApproved + todayRejected;
+//        vo.setApprovalRate(totalReviewed > 0
+//                ? Math.round(todayApproved * 100.0 / totalReviewed) : 0);
+//
+//        // 积压预警: 超过3天未审核
+//        Calendar cal = Calendar.getInstance();
+//        cal.add(Calendar.DAY_OF_MONTH, -3);
+//        vo.setStalePending((int) this.count(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getStatus, "1")
+//                        .lt(BizBill::getCreateTime, cal.getTime())));
+//
+//        // 最近审核记录
+//        List<BizBill> recentBills = this.list(
+//                new LambdaQueryWrapper<BizBill>()
+//                        .eq(BizBill::getAuditBy, username)
+//                        .in(BizBill::getStatus, "2", "3")
+//                        .orderByDesc(BizBill::getAuditTime)
+//                        .last("LIMIT 5"));
+//        Map<Long, String> categoryNameMap = buildCategoryNameMap(recentBills);
+//        vo.setRecentReviews(recentBills.stream().map(bill -> {
+//            BizBillVo billVo = new BizBillVo();
+//            BeanUtils.copyProperties(bill, billVo);
+//            if (bill.getCategoryId() != null) {
+//                billVo.setCategoryName(categoryNameMap.get(bill.getCategoryId()));
+//            }
+//            return billVo;
+//        }).collect(Collectors.toList()));
+//
+//        return vo;
+//    }
+//
+//    @Override
+//    public UserBillStatsVo getUserBillStats() {
+//        String username = SecurityUtils.getUsername();
+//
+//        // 查询当前用户的所有票据
+//        LambdaQueryWrapper<BizBill> wrapper = new LambdaQueryWrapper<BizBill>()
+//                .eq(BizBill::getCreateBy, username);
+//        List<BizBill> allBills = this.list(wrapper);
+//
+//        // 统计各状态数量
+//        long draftCount = allBills.stream().filter(b -> "0".equals(b.getStatus())).count();
+//        long submittedCount = allBills.stream().filter(b -> "1".equals(b.getStatus())).count();
+//        long approvedCount = allBills.stream().filter(b -> "2".equals(b.getStatus())).count();
+//        long rejectedCount = allBills.stream().filter(b -> "3".equals(b.getStatus())).count();
+//
+//        // 计算已通过票据的总金额
+//        java.math.BigDecimal totalAmount = allBills.stream()
+//                .filter(b -> "2".equals(b.getStatus()))
+//                .map(BizBill::getAmount)
+//                .filter(amount -> amount != null)
+//                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+//
+//        return UserBillStatsVo.builder()
+//                .totalCount((long) allBills.size())
+//                .draftCount(draftCount)
+//                .submittedCount(submittedCount)
+//                .approvedCount(approvedCount)
+//                .rejectedCount(rejectedCount)
+//                .totalAmount(totalAmount.setScale(2, java.math.RoundingMode.HALF_UP).toString())
+//                .build();
+//    }
+//
+//}
+
+
