@@ -21,6 +21,7 @@ public class OperLogAutoExportTask {
     /** 每30秒检查一次是否需要导出 */
     @Scheduled(fixedDelay = 30_000)
     public void checkAndExport() {
+        // 从配置表里读导出间隔是多少分钟
         try {
             ISysConfigService configService = SpringUtils.getBean(ISysConfigService.class);
             String intervalStr = configService.selectConfigByKey("sys.operlog.autoExportInterval");
