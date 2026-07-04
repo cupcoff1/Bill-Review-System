@@ -1,0 +1,32 @@
+package com.zsc.module.service.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.zsc.common.core.domain.entity.SysUser;
+import com.zsc.common.utils.SecurityUtils;
+import com.zsc.module.common.exception.ServiceException;
+import com.zsc.module.domain.dto.BizRegisterRequestDto;
+import com.zsc.module.domain.entity.BizRegisterRequest;
+import com.zsc.module.domain.vo.BizRegisterRequestVo;
+import com.zsc.module.mapper.BizRegisterRequestMapper;
+import com.zsc.module.service.BizRegisterRequestService;
+import com.zsc.module.service.EmailService;
+import com.zsc.system.mapper.SysUserMapper;
+import com.zsc.system.mapper.SysUserRoleMapper;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.security.SecureRandom;
+import java.util.Date;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+@Transactional
+public class BizRegisterRequestServiceImpl extends ServiceImpl<BizRegisterRequestMapper, BizRegisterRequest>
+        implements BizRegisterRequestService {
+
+
