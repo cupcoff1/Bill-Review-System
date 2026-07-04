@@ -76,20 +76,20 @@
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
-                <span>各类别金额汇总</span>
+                <span>审核趋势分析</span>
               </div>
             </template>
-            <div ref="categoryChartRef" class="chart-container"></div>
+            <div ref="reviewTrendChartRef" class="chart-container"></div>
           </el-card>
         </el-col>
         <el-col :xs="24" :sm="24" :md="12" :lg="8">
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
-                <span>本月审核趋势</span>
+                <span>审核构成分析</span>
               </div>
             </template>
-            <div ref="trendChartRef" class="chart-container"></div>
+            <div ref="reviewCompositionChartRef" class="chart-container"></div>
           </el-card>
         </el-col>
         <el-col :xs="24" :sm="24" :md="12" :lg="8">
@@ -278,7 +278,7 @@ import * as echarts from 'echarts'
 import { useRouter } from 'vue-router'
 import useSettingsStore from '@/store/modules/settings'
 import useUserStore from '@/store/modules/user'
-import { listBill, getCategorySummary, getTrend, getReviewerStats } from '@/api/biz/bill'
+import { listBill, getCategorySummary, getTrend, getReviewerStats, getReviewTrend, getReviewComposition } from '@/api/biz/bill'
 
 const { proxy } = getCurrentInstance()
 const settingsStore = useSettingsStore()
@@ -293,6 +293,8 @@ const statusChartRef = ref(null)
 const categoryChartRef = ref(null)
 const userCategoryChartRef = ref(null)
 const trendChartRef = ref(null)
+const reviewTrendChartRef = ref(null)
+const reviewCompositionChartRef = ref(null)
 const loading = ref(false)
 const reviewerLoading = ref(false)
 
@@ -360,6 +362,64 @@ function initTrendChart(data) {
   window.addEventListener('resize', () => chart.resize())
 }
 
+// ==================== 审核员新图表 ====================
+function initReviewTrendChart(data) {
+  if (!reviewTrendChartRef.value) return
+  const chart = echarts.init(reviewTrendChartRef.value)
+  const dark = isDark()
+  chart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      formatter: p => {
+        let s = p[0].name + '<br/>'
+        p.forEach(item => {
+          s += item.marker + ' ' + item.seriesName + ': ' + (item.seriesName === '通过率' ? item.value + '%' : item.value) + '<br/>'
+        })
+        return s
+      }
+    },
+    legend: { data: ['审核单量', '通过率'], textStyle: { color: dark ? '#ccc' : '#333' } },
+    grid: { left: '3%', right: '6%', bottom: '3%', containLabel: true },
+    xAxis: { type: 'category', data: data.map(d => d.month), axisLabel: { color: dark ? '#aaa' : '#666', rotate: 30 } },
+    yAxis: [
+      { type: 'value', name: '单量', nameTextStyle: { color: dark ? '#ccc' : '#666' }, axisLabel: { color: dark ? '#aaa' : '#666' } },
+      { type: 'value', name: '通过率(%)', nameTextStyle: { color: dark ? '#ccc' : '#666' }, axisLabel: { color: dark ? '#aaa' : '#666' }, max: 100, min: 0 }
+    ],
+    series: [
+      {
+        name: '审核单量', type: 'line', smooth: true, data: data.map(d => d.count),
+        itemStyle: { color: '#4facfe' },
+        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(79, 172, 254, 0.4)' }, { offset: 1, color: 'rgba(79, 172, 254, 0.02)' }]) }
+      },
+      {
+        name: '通过率', type: 'line', smooth: true, yAxisIndex: 1, data: data.map(d => d.passRate),
+        itemStyle: { color: '#43e97b' },
+        lineStyle: { type: 'dashed' }
+      }
+    ]
+  })
+  window.addEventListener('resize', () => chart.resize())
+}
+
+function initReviewCompositionChart(data) {
+  if (!reviewCompositionChartRef.value) return
+  const chart = echarts.init(reviewCompositionChartRef.value)
+  const dark = isDark()
+  const colors = ['#667eea', '#43e97b', '#f56c6c', '#4facfe', '#fa709a', '#e6a23c', '#f093fb', '#fee140']
+  chart.setOption({
+    tooltip: { trigger: 'item', formatter: p => `${p.name}<br/>¥${Number(p.value).toLocaleString()} (${p.percent}%)` },
+    legend: { orient: 'vertical', left: 'left', top: 'middle', textStyle: { color: dark ? '#ccc' : '#333' } },
+    color: colors,
+    series: [{
+      name: '费用构成', type: 'pie', radius: ['40%', '70%'], center: ['62%', '50%'],
+      label: { color: dark ? '#ccc' : '#333', formatter: '{b}: {d}%' },
+      data: data.map((d, i) => ({ value: d.amount, name: d.categoryName, itemStyle: { color: colors[i % colors.length] } })),
+      emphasis: { itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.5)' } }
+    }]
+  })
+  window.addEventListener('resize', () => chart.resize())
+}
+
 // ==================== 普通用户图表 ====================
 function initStatusChart() {
   if (!statusChartRef.value) return
@@ -409,8 +469,8 @@ function loadReviewerData() {
   }).finally(() => {
     reviewerLoading.value = false
     nextTick(() => {
-      getCategorySummary().then(res => initCategoryChart(res.data || [])).catch(() => initCategoryChart([]))
-      getTrend().then(res => initTrendChart(res.data || [])).catch(() => initTrendChart([]))
+      getReviewTrend().then(res => initReviewTrendChart(res.data || [])).catch(() => initReviewTrendChart([]))
+      getReviewComposition().then(res => initReviewCompositionChart(res.data || [])).catch(() => initReviewCompositionChart([]))
     })
   })
 }
