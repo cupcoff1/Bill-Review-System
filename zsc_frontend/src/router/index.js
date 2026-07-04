@@ -141,7 +141,7 @@ export const dynamicRoutes = [
     path: '/admin/aiAssistant',
     component: Layout,
     hidden: false,
-    roles: ['admin_user'],
+    roles: ['admin', 'admin_user'],
     children: [
       {
         path: '',

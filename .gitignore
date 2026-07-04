@@ -36,3 +36,5 @@ application-druid.yml
 *.swp
 *.xml.versionsBackup
 ~
+exports/
+wsl.txt

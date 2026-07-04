@@ -218,6 +218,56 @@ public class SysAdminController extends BaseController {
         return success(result);
     }
 
+    @Autowired
+    private com.zsc.system.service.ISysConfigService configService;
+
+    @Autowired
+    private com.zsc.system.mapper.SysConfigMapper configMapper;
+
+    private static final String EXPORT_INTERVAL_KEY = "sys.operlog.autoExportInterval";
+
+    /**
+     * 获取操作日志自动导出间隔（分钟，0=关闭）
+     */
+    @PreAuthorize("@ss.hasPermi('biz:admin:list')")
+    @GetMapping("/operlog-export-interval")
+    public AjaxResult getExportInterval() {
+        String val = configService.selectConfigByKey(EXPORT_INTERVAL_KEY);
+        if (val == null || val.isBlank()) return success(0);
+        try {
+            return success(Integer.parseInt(val.trim()));
+        } catch (NumberFormatException e) {
+            return success(0);
+        }
+    }
+
+    /**
+     * 设置操作日志自动导出间隔（分钟，0=关闭）
+     */
+    @PreAuthorize("@ss.hasPermi('biz:admin:list')")
+    @PutMapping("/operlog-export-interval")
+    public AjaxResult setExportInterval(@RequestBody Map<String, Integer> body) {
+        int interval = body.getOrDefault("interval", 0);
+        if (interval < 0 || interval > 1440) {
+            return error("间隔必须为 0-1440 分钟");
+        }
+        // 用 checkConfigKeyUnique（有 LIMIT 1），不存在则自动插入
+        com.zsc.system.domain.SysConfig cfg = configMapper.checkConfigKeyUnique(EXPORT_INTERVAL_KEY);
+        if (cfg == null) {
+            cfg = new com.zsc.system.domain.SysConfig();
+            cfg.setConfigName("操作日志自动导出间隔");
+            cfg.setConfigKey(EXPORT_INTERVAL_KEY);
+            cfg.setConfigValue(String.valueOf(interval));
+            cfg.setConfigType("Y");
+            cfg.setCreateBy(getUsername());
+            configMapper.insertConfig(cfg);
+        } else {
+            cfg.setConfigValue(String.valueOf(interval));
+            configService.updateConfig(cfg);
+        }
+        return success();
+    }
+
     private Long getRoleIdByKey(String roleKey) {
         com.zsc.common.core.domain.entity.SysRole role = roleMapper.checkRoleKeyUnique(roleKey);
         if (role == null) {

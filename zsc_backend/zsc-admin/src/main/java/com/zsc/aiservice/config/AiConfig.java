@@ -1,6 +1,7 @@
 package com.zsc.aiservice.config;
 
 import com.zsc.aiservice.repository.RedisChatMemoryStore;
+import dev.langchain4j.community.store.embedding.redis.RedisEmbeddingStore;
 import dev.langchain4j.data.document.Document;
 import dev.langchain4j.data.document.splitter.DocumentSplitters;
 import dev.langchain4j.data.segment.TextSegment;
@@ -12,7 +13,6 @@ import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.EmbeddingStoreIngestor;
-import dev.langchain4j.community.store.embedding.redis.RedisEmbeddingStore;
 import dev.langchain4j.store.memory.chat.ChatMemoryStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -85,12 +85,17 @@ public class AiConfig {
     EmbeddingStore<TextSegment> embeddingStore(
             @Value("${spring.data.redis.host:localhost}") String redisHost,
             @Value("${spring.data.redis.port:6379}") int redisPort) {
-        return RedisEmbeddingStore.builder()
-                .host(redisHost)
-                .port(redisPort)
-                .indexName("admin-knowledge")
-                .dimension(1024)
-                .build();
+        try {
+            return RedisEmbeddingStore.builder()
+                    .host(redisHost)
+                    .port(redisPort)
+                    .indexName("admin-knowledge")
+                    .dimension(1024)
+                    .build();
+        } catch (Exception e) {
+            // Redis缺少向量搜索模块(Redis Stack)，回退到内存存储
+            return new dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore<>();
+        }
     }
 
     /**

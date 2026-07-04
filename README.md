@@ -12,6 +12,7 @@
 | 数据库 | MySQL 8.0 |
 | 缓存 | Redis |
 | 邮件 | JavaMailSender (163 SMTP) |
+| AI 框架 | LangChain4j + DeepSeek (通义千问) |
 | 前端框架 | Vue 3.5 + Vite 5 |
 | UI 组件库 | Element Plus 2.13 |
 | 图表 | ECharts 5 |
@@ -37,6 +38,7 @@ Bill-Review-System/
 │       ├── api/biz/                       # API 封装 (admin.js/bill.js)
 │       ├── router/                        # 路由配置 (含 dynamicRoutes)
 │       └── store/                         # 状态管理
+├── deploy/                                # 部署配置 (Nginx / 构建脚本)
 └── docs/                                  # 设计文档
 ```
 
@@ -68,6 +70,11 @@ Bill-Review-System/
 | 类别保护 | "其他"不可删/改，删类别时票据自动迁移 |
 | 积压预警 | 超 3 天未审票据标记，一键筛选 |
 | 数据隔离 | 审核员只看自己审的，用户只看自己提交的 |
+| 单点登录 | 同一账号只能一处在线，后登踢前登 |
+| 操作日志 | `@Log` 注解自动记录增删改查，支持筛选/清空/导出 |
+| 自动导出 | 可配置定时导出操作日志 Excel 并清空 |
+| 软删除 | 用户软删除保留审计凭证，用户名不释放 |
+| AI 助手 | 自然语言查询系统数据，Tool Calling 调用 Service |
 
 ## 快速开始
 

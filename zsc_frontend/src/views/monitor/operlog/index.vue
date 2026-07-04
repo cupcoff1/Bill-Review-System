@@ -22,6 +22,10 @@
          <el-button type="danger" plain icon="Delete" :disabled="multiple" @click="handleDelete" v-hasPermi="['monitor:operlog:remove']">删除</el-button>
          <el-button type="danger" plain icon="Delete" @click="handleClean" v-hasPermi="['monitor:operlog:remove']">清空</el-button>
          <el-button type="warning" plain icon="Download" @click="handleExport" v-hasPermi="['monitor:operlog:export']">导出</el-button>
+         <el-divider direction="vertical" />
+         <span style="font-size:12px;color:#909399;white-space:nowrap">自动导出</span>
+         <el-input-number v-model="exportInterval" :min="0" :max="1440" :step="5" size="small" style="width:90px" @change="handleSetInterval" v-hasPermi="['biz:admin:list']" />
+         <span style="font-size:12px;color:#909399">分钟(0=关)</span>
       </div>
 
       <el-table ref="operlogRef" v-loading="loading" :data="operlogList" @selection-change="handleSelectionChange" :default-sort="defaultSort" @sort-change="handleSortChange">
@@ -115,6 +119,7 @@
 
 <script setup name="Operlog">
 import { list, delOperlog, cleanOperlog } from "@/api/monitor/operlog"
+import request from "@/utils/request"
 
 const { proxy } = getCurrentInstance()
 const { sys_oper_type, sys_common_status } = proxy.useDict("sys_oper_type", "sys_common_status")
@@ -129,6 +134,7 @@ const total = ref(0)
 const title = ref("")
 const dateRange = ref([])
 const defaultSort = ref({ prop: "operTime", order: "descending" })
+const exportInterval = ref(0)
 
 const data = reactive({
   form: {},
@@ -147,7 +153,12 @@ const { queryParams, form } = toRefs(data)
 /** 查询登录日志 */
 function getList() {
   loading.value = true
-  list(proxy.addDateRange(queryParams.value, dateRange.value)).then(response => {
+  const params = proxy.addDateRange(queryParams.value, dateRange.value)
+  // 清理所有空字符串参数，避免后端 Integer 绑定报错
+  Object.keys(params).forEach(k => {
+    if (params[k] === '' || params[k] === undefined) delete params[k]
+  })
+  list(params).then(response => {
     operlogList.value = response.rows
     total.value = response.total
     loading.value = false
@@ -223,7 +234,20 @@ function handleExport() {
   }, `config_${new Date().getTime()}.xlsx`)
 }
 
+function loadExportInterval() {
+  request({ url: '/api/admin/operlog-export-interval', method: 'get' }).then(res => {
+    exportInterval.value = res.data || 0
+  }).catch(() => {})
+}
+
+function handleSetInterval(val) {
+  request({ url: '/api/admin/operlog-export-interval', method: 'put', data: { interval: val } }).then(res => {
+    proxy.$modal.msgSuccess('自动导出间隔已更新')
+  })
+}
+
 getList()
+loadExportInterval()
 </script>
 
 <style scoped>
