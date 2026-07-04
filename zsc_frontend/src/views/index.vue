@@ -367,6 +367,16 @@ function initReviewTrendChart(data) {
   if (!reviewTrendChartRef.value) return
   const chart = echarts.init(reviewTrendChartRef.value)
   const dark = isDark()
+  // 如果数据为空，生成近12个月的空壳月份标签
+  if (!data || data.length === 0) {
+    const now = new Date()
+    data = []
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+      const m = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+      data.push({ month: m, count: 0, passRate: 0 })
+    }
+  }
   chart.setOption({
     tooltip: {
       trigger: 'axis',
@@ -380,21 +390,33 @@ function initReviewTrendChart(data) {
     },
     legend: { data: ['审核单量', '通过率'], textStyle: { color: dark ? '#ccc' : '#333' } },
     grid: { left: '3%', right: '6%', bottom: '3%', containLabel: true },
-    xAxis: { type: 'category', data: data.map(d => d.month), axisLabel: { color: dark ? '#aaa' : '#666', rotate: 30 } },
+    xAxis: {
+      type: 'category',
+      data: data.map(d => d.month),
+      name: '月份',
+      nameTextStyle: { color: dark ? '#ccc' : '#666' },
+      axisLabel: { color: dark ? '#aaa' : '#666', rotate: 30 },
+      boundaryGap: false
+    },
     yAxis: [
-      { type: 'value', name: '单量', nameTextStyle: { color: dark ? '#ccc' : '#666' }, axisLabel: { color: dark ? '#aaa' : '#666' } },
-      { type: 'value', name: '通过率(%)', nameTextStyle: { color: dark ? '#ccc' : '#666' }, axisLabel: { color: dark ? '#aaa' : '#666' }, max: 100, min: 0 }
+      { type: 'value', name: '审核单量(笔)', nameTextStyle: { color: dark ? '#ccc' : '#666' }, axisLabel: { color: dark ? '#aaa' : '#666' }, minInterval: 1 },
+      { type: 'value', name: '通过率(%)', nameTextStyle: { color: dark ? '#ccc' : '#666' }, axisLabel: { color: dark ? '#aaa' : '#666', formatter: '{value}%' }, max: 100, min: 0 }
     ],
     series: [
       {
-        name: '审核单量', type: 'line', smooth: true, data: data.map(d => d.count),
+        name: '审核单量', type: 'line', smooth: true,
+        data: data.map(d => d.count),
         itemStyle: { color: '#4facfe' },
+        lineStyle: { width: 3 },
+        symbolSize: 6,
         areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(79, 172, 254, 0.4)' }, { offset: 1, color: 'rgba(79, 172, 254, 0.02)' }]) }
       },
       {
-        name: '通过率', type: 'line', smooth: true, yAxisIndex: 1, data: data.map(d => d.passRate),
+        name: '通过率', type: 'line', smooth: true, yAxisIndex: 1,
+        data: data.map(d => d.passRate),
         itemStyle: { color: '#43e97b' },
-        lineStyle: { type: 'dashed' }
+        lineStyle: { width: 3, type: 'dashed' },
+        symbolSize: 6
       }
     ]
   })
@@ -406,13 +428,25 @@ function initReviewCompositionChart(data) {
   const chart = echarts.init(reviewCompositionChartRef.value)
   const dark = isDark()
   const colors = ['#667eea', '#43e97b', '#f56c6c', '#4facfe', '#fa709a', '#e6a23c', '#f093fb', '#fee140']
+  // 数据为空时显示提示
+  if (!data || data.length === 0) {
+    chart.setOption({
+      title: { text: '暂无审核通过数据', left: 'center', top: 'center', textStyle: { color: dark ? '#999' : '#aaa', fontSize: 14 } },
+      series: []
+    })
+    return
+  }
   chart.setOption({
-    tooltip: { trigger: 'item', formatter: p => `${p.name}<br/>¥${Number(p.value).toLocaleString()} (${p.percent}%)` },
-    legend: { orient: 'vertical', left: 'left', top: 'middle', textStyle: { color: dark ? '#ccc' : '#333' } },
+    tooltip: { trigger: 'item', formatter: p => `${p.name}<br/>金额: ¥${Number(p.value).toLocaleString()}<br/>占比: ${p.percent}%` },
+    legend: {
+      orient: 'vertical', left: 'left', top: 'middle',
+      textStyle: { color: dark ? '#ccc' : '#333' },
+      data: data.map(d => d.categoryName)
+    },
     color: colors,
     series: [{
       name: '费用构成', type: 'pie', radius: ['40%', '70%'], center: ['62%', '50%'],
-      label: { color: dark ? '#ccc' : '#333', formatter: '{b}: {d}%' },
+      label: { color: dark ? '#ccc' : '#333', formatter: '{b}\n{d}%' },
       data: data.map((d, i) => ({ value: d.amount, name: d.categoryName, itemStyle: { color: colors[i % colors.length] } })),
       emphasis: { itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.5)' } }
     }]
@@ -469,8 +503,14 @@ function loadReviewerData() {
   }).finally(() => {
     reviewerLoading.value = false
     nextTick(() => {
-      getReviewTrend().then(res => initReviewTrendChart(res.data || [])).catch(() => initReviewTrendChart([]))
-      getReviewComposition().then(res => initReviewCompositionChart(res.data || [])).catch(() => initReviewCompositionChart([]))
+      getReviewTrend().then(res => {
+        console.log('[审核趋势] API返回:', JSON.stringify(res.data))
+        initReviewTrendChart(res.data || [])
+      }).catch(err => { console.warn('[审核趋势] 接口异常:', err); initReviewTrendChart([]) })
+      getReviewComposition().then(res => {
+        console.log('[审核构成] API返回:', JSON.stringify(res.data))
+        initReviewCompositionChart(res.data || [])
+      }).catch(err => { console.warn('[审核构成] 接口异常:', err); initReviewCompositionChart([]) })
     })
   })
 }

@@ -95,7 +95,7 @@ public class BizBillController {
      */
     @Operation(summary = "获取票据详情")
     @PreAuthorize("@ss.hasPermi('biz:bill:query')")
-    @GetMapping("/{id}")
+    @GetMapping("/{id:\\d+}")
     public ResultVo<BizBillDetailVo> get(@PathVariable @Min(value = 1, message = "票据ID不能小于1") Long id) {
         return ResultVo.ok(bizBillService.getBillDetail(id));
     }
@@ -145,7 +145,7 @@ public class BizBillController {
     @Operation(summary = "删除票据")
     @PreAuthorize("@ss.hasPermi('biz:bill:remove')")
     @Log(title = "票据管理", businessType = BusinessType.DELETE)
-    @DeleteMapping("/{id}")
+    @DeleteMapping("/{id:\\d+}")
     public ResultVo delete(@PathVariable @Min(value = 1, message = "票据ID不能小于1") Long id) {
         bizBillService.deleteBill(id);
         return ResultVo.ok("删除成功");
