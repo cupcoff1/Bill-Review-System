@@ -1,0 +1,659 @@
+package com.zsc.module.service.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.zsc.common.utils.SecurityUtils;
+import com.zsc.module.common.exception.ServiceException;
+import com.zsc.module.domain.dto.AiChatDto;
+import com.zsc.module.domain.entity.BizBill;
+import com.zsc.module.domain.entity.BizCategory;
+import com.zsc.module.domain.vo.AiChatResponseVo;
+import com.zsc.module.mapper.BizBillMapper;
+import com.zsc.module.mapper.BizCategoryMapper;
+import com.zsc.module.service.AiChatService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.text.SimpleDateFormat;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * AI交互服务实现类
+ * 提供简单的基于规则的票据问答功能
+ */
+@Slf4j
+@Service
+public class AiChatServiceImpl implements AiChatService {
+
+    @Autowired
+    private BizBillMapper billMapper;
+
+    @Autowired
+    private BizCategoryMapper categoryMapper;
+
+    // 状态映射
+    private static final String[] STATUS_MAP = {"草稿", "已提交", "已通过", "已退回"};
+
+    /**
+     * AI简单问答 - 票据相关信息查询
+     * 基于规则引擎实现简单问答，后续可接入真实AI模型
+     */
+    @Override
+    public AiChatResponseVo chat(AiChatDto chatDto) {
+        String userInput = chatDto.getUserInput();
+        Long billId = chatDto.getBillId();
+
+        if (userInput == null || userInput.trim().isEmpty()) {
+            return buildErrorResponse("请输入您的问题");
+        }
+
+        try {
+            // 如果提供了billId，优先处理该票据相关问题
+            if (billId != null) {
+                return handleBillSpecificQuestion(billId, userInput);
+            }
+
+            // 通用问题处理
+            return handleGeneralQuestion(userInput);
+        } catch (Exception e) {
+            log.error("AI问答失败: {}", e.getMessage(), e);
+            return buildErrorResponse("抱歉，处理您的问题时出现错误：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 获取票据信息摘要（用于AI问答上下文）
+     */
+    @Override
+    public String getBillSummary(Long billId) {
+        BizBill bill = billMapper.selectById(billId);
+        if (bill == null) {
+            return null;
+        }
+
+        StringBuilder summary = new StringBuilder();
+        summary.append("票据编号：").append(bill.getBillNo()).append("\n");
+        summary.append("标题：").append(bill.getTitle()).append("\n");
+        
+        if (bill.getCategoryId() != null) {
+            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+            if (category != null) {
+                summary.append("类别：").append(category.getCategoryName()).append("\n");
+            }
+        }
+        
+        summary.append("金额：¥").append(bill.getAmount()).append("\n");
+        summary.append("状态：").append(STATUS_MAP[Integer.parseInt(bill.getStatus())]).append("\n");
+        
+        if (bill.getDescription() != null && !bill.getDescription().isEmpty()) {
+            summary.append("描述：").append(bill.getDescription()).append("\n");
+        }
+        
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        summary.append("创建时间：").append(sdf.format(bill.getCreateTime())).append("\n");
+        
+        if (bill.getAuditTime() != null) {
+            summary.append("审核时间：").append(sdf.format(bill.getAuditTime())).append("\n");
+            summary.append("审核人：").append(bill.getAuditBy()).append("\n");
+            if (bill.getAuditComment() != null) {
+                summary.append("审核意见：").append(bill.getAuditComment());
+            }
+        }
+
+        return summary.toString();
+    }
+
+    /**
+     * 处理针对特定票据的问题
+     */
+    private AiChatResponseVo handleBillSpecificQuestion(Long billId, String question) {
+        BizBill bill = billMapper.selectById(billId);
+        if (bill == null) {
+            return buildErrorResponse("未找到该票据信息");
+        }
+
+        // 检查权限：只能查看自己的票据或管理员可以查看所有
+        if (!SecurityUtils.hasPermi("biz:bill:review") 
+            && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+            return buildErrorResponse("您无权查看此票据信息");
+        }
+
+        String lowerQuestion = question.toLowerCase();
+
+        // 1. 询问票据状态
+        if (lowerQuestion.contains("状态") || lowerQuestion.contains("status")) {
+            String statusText = STATUS_MAP[Integer.parseInt(bill.getStatus())];
+            return buildSuccessResponse(
+                String.format("票据【%s】的状态是：%s", bill.getTitle(), statusText),
+                billId,
+                "您可以通过'我的票据'页面查看详细进度"
+            );
+        }
+
+        // 2. 询问票据金额
+        if (lowerQuestion.contains("金额") || lowerQuestion.contains("多少钱") || lowerQuestion.contains("price")) {
+            return buildSuccessResponse(
+                String.format("票据【%s】的金额为：¥%s", bill.getTitle(), bill.getAmount()),
+                billId,
+                "如需修改金额，请在草稿状态下编辑"
+            );
+        }
+
+        // 3. 询问票据类别
+        if (lowerQuestion.contains("类别") || lowerQuestion.contains("类型") || lowerQuestion.contains("category")) {
+            String categoryName = "未知";
+            if (bill.getCategoryId() != null) {
+                BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+                if (category != null) {
+                    categoryName = category.getCategoryName();
+                }
+            }
+            return buildSuccessResponse(
+                String.format("票据【%s】的类别是：%s", bill.getTitle(), categoryName),
+                billId,
+                null
+            );
+        }
+
+        // 4. 询问审核情况
+        if (lowerQuestion.contains("审核") || lowerQuestion.contains("audit")) {
+            if ("0".equals(bill.getStatus()) || "1".equals(bill.getStatus())) {
+                return buildSuccessResponse(
+                    String.format("票据【%s】尚未完成审核。当前状态：%s", 
+                        bill.getTitle(), STATUS_MAP[Integer.parseInt(bill.getStatus())]),
+                    billId,
+                    "请耐心等待审核人员处理"
+                );
+            } else {
+                String auditResult = "2".equals(bill.getStatus()) ? "通过" : "退回";
+                String comment = bill.getAuditComment() != null ? bill.getAuditComment() : "无";
+                return buildSuccessResponse(
+                    String.format("票据【%s】审核结果：%s\n审核人：%s\n审核意见：%s", 
+                        bill.getTitle(), auditResult, bill.getAuditBy(), comment),
+                    billId,
+                    "2".equals(bill.getStatus()) ? "恭喜！票据审核通过" : "请根据审核意见修改后重新提交"
+                );
+            }
+        }
+
+        // 5. 询问票据详情
+        if (lowerQuestion.contains("详情") || lowerQuestion.contains("detail") || lowerQuestion.contains("信息")) {
+            String summary = getBillSummary(billId);
+            return buildSuccessResponse(
+                "以下是票据详细信息：\n" + summary,
+                billId,
+                "您可以点击'票据概览'查看完整详情和附件"
+            );
+        }
+
+        // 6. 默认回复
+        return buildSuccessResponse(
+            String.format("关于票据【%s】，您可以询问：\n1. 状态是什么？\n2. 金额是多少？\n3. 属于什么类别？\n4. 审核情况如何？\n5. 查看详细信息", 
+                bill.getTitle()),
+            billId,
+            "请选择具体问题或点击'票据概览'查看详情"
+        );
+    }
+
+    /**
+     * 处理通用问题
+     */
+    private AiChatResponseVo handleGeneralQuestion(String question) {
+        String lowerQuestion = question.toLowerCase();
+
+        // 1. 询问如何提交票据
+        if (lowerQuestion.contains("怎么提交") || lowerQuestion.contains("如何提交") || lowerQuestion.contains("submit")) {
+            return buildSuccessResponse(
+                "提交票据步骤：\n" +
+                "1. 在'我的票据'页面点击'新增'\n" +
+                "2. 填写票据信息并上传附件\n" +
+                "3. 保存为草稿或直接提交\n" +
+                "4. 如保存草稿，可在草稿列表点击'提交审核'",
+                null,
+                "现在就去'我的票据'页面创建新票据吧！"
+            );
+        }
+
+        // 2. 询问票据流程
+        if (lowerQuestion.contains("流程") || lowerQuestion.contains("procedure") || lowerQuestion.contains("process")) {
+            return buildSuccessResponse(
+                "票据报销流程：\n" +
+                "1. 用户创建票据（草稿状态）\n" +
+                "2. 用户提交审核（已提交状态）\n" +
+                "3. 审核员审核（通过/退回）\n" +
+                "4. 通过后状态变为'已通过'，可下载附件\n" +
+                "5. 退回后状态变为'已退回'，需修改后重新提交",
+                null,
+                "您可以在'票据概览'页面查看各类票据的统计信息"
+            );
+        }
+
+        // 3. 询问附件相关
+        if (lowerQuestion.contains("附件") || lowerQuestion.contains("attachment") || lowerQuestion.contains("文件")) {
+            return buildSuccessResponse(
+                "附件管理说明：\n" +
+                "• 支持格式：PDF、图片(JPG/PNG)、Word、Excel等\n" +
+                "• 单文件大小限制：50MB\n" +
+                "• 可在线预览：PDF和图片格式\n" +
+                "• 已审核通过的票据可下载附件",
+                null,
+                "在票据详情页可查看和预览附件"
+            );
+        }
+
+        // 4. 询问审核标准
+        if (lowerQuestion.contains("审核标准") || lowerQuestion.contains("要求") || lowerQuestion.contains("standard")) {
+            return buildSuccessResponse(
+                "票据审核要点：\n" +
+                "1. 票据信息完整性（标题、类别、金额、描述）\n" +
+                "2. 附件齐全且清晰可读\n" +
+                "3. 金额与附件一致\n" +
+                "4. 符合公司财务规定\n" +
+                "5. 日期合理且在有效期内",
+                null,
+                "确保票据信息准确完整可提高审核通过率"
+            );
+        }
+
+        // 5. 询问常见问题
+        if (lowerQuestion.contains("常见问题") || lowerQuestion.contains("faq") || lowerQuestion.contains("帮助")) {
+            return buildSuccessResponse(
+                "常见问题解答：\n" +
+                "Q: 为什么无法编辑票据？\n" +
+                "A: 只有草稿和已退回状态的票据可以编辑\n\n" +
+                "Q: 如何撤回已提交的票据？\n" +
+                "A: 已提交的票据无法撤回，请联系审核员\n\n" +
+                "Q: 附件上传失败怎么办？\n" +
+                "A: 检查文件格式和大小，确保不超过50MB\n\n" +
+                "Q: 审核需要多长时间？\n" +
+                "A: 一般1-3个工作日，具体时间取决于审核员工作量",
+                null,
+                "如有其他问题，请联系系统管理员"
+            );
+        }
+
+        // 6. 询问票据统计
+        if (lowerQuestion.contains("统计") || lowerQuestion.contains("summary") || lowerQuestion.contains("汇总")) {
+            return buildSuccessResponse(
+                "票据统计功能：\n" +
+                "• 票据概览页面可查看各类别金额汇总\n" +
+                "• 可查看本月提交趋势\n" +
+                "• 可按状态筛选查看票据分布\n" +
+                "• 审核员可查看个人审核统计",
+                null,
+                "点击左侧菜单'票据概览'查看详细统计"
+            );
+        }
+
+        // 7. 默认回复
+        return buildSuccessResponse(
+            "您好！我是票据助手，可以帮您：\n" +
+            "• 查询票据信息（需提供票据ID）\n" +
+            "• 解答票据提交流程问题\n" +
+            "• 说明审核标准和注意事项\n" +
+            "• 指导附件管理和下载\n\n" +
+            "您可以直接提问，例如：\n" +
+            "'这张票据的状态是什么？'（需在票据详情页使用）\n" +
+            "'怎么提交票据？'\n" +
+            "'附件有什么要求？'",
+            null,
+            "选择具体问题进行咨询"
+        );
+    }
+
+    /**
+     * 构建成功响应
+     */
+    private AiChatResponseVo buildSuccessResponse(String answer, Long billId, String suggestion) {
+        return AiChatResponseVo.builder()
+                .answer(answer)
+                .success(true)
+                .billId(billId)
+                .suggestion(suggestion)
+                .build();
+    }
+
+    /**
+     * 构建错误响应
+     */
+    private AiChatResponseVo buildErrorResponse(String message) {
+        return AiChatResponseVo.builder()
+                .answer(message)
+                .success(false)
+                .billId(null)
+                .suggestion(null)
+                .build();
+    }
+}
+//package com.zsc.module.service.impl;
+//
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import com.zsc.common.utils.SecurityUtils;
+//import com.zsc.module.common.exception.ServiceException;
+//import com.zsc.module.domain.dto.AiChatDto;
+//import com.zsc.module.domain.entity.BizBill;
+//import com.zsc.module.domain.entity.BizCategory;
+//import com.zsc.module.domain.vo.AiChatResponseVo;
+//import com.zsc.module.mapper.BizBillMapper;
+//import com.zsc.module.mapper.BizCategoryMapper;
+//import com.zsc.module.service.AiChatService;
+//import lombok.extern.slf4j.Slf4j;
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//
+//import java.math.BigDecimal;
+//import java.text.SimpleDateFormat;
+//import java.util.regex.Matcher;
+//import java.util.regex.Pattern;
+//
+///**
+// * AI交互服务实现类
+// * 提供简单的基于规则的票据问答功能
+// */
+//@Slf4j
+//@Service
+//public class AiChatServiceImpl implements AiChatService {
+//
+//    @Autowired
+//    private BizBillMapper billMapper;
+//
+//    @Autowired
+//    private BizCategoryMapper categoryMapper;
+//
+//    // 状态映射
+//    private static final String[] STATUS_MAP = {"草稿", "已提交", "已通过", "已退回"};
+//
+//    /**
+//     * AI简单问答 - 票据相关信息查询
+//     * 基于规则引擎实现简单问答，后续可接入真实AI模型
+//     */
+//    @Override
+//    public AiChatResponseVo chat(AiChatDto chatDto) {
+//        String userInput = chatDto.getUserInput();
+//        Long billId = chatDto.getBillId();
+//
+//        if (userInput == null || userInput.trim().isEmpty()) {
+//            return buildErrorResponse("请输入您的问题");
+//        }
+//
+//        try {
+//            // 如果提供了billId，优先处理该票据相关问题
+//            if (billId != null) {
+//                return handleBillSpecificQuestion(billId, userInput);
+//            }
+//
+//            // 通用问题处理
+//            return handleGeneralQuestion(userInput);
+//        } catch (Exception e) {
+//            log.error("AI问答失败: {}", e.getMessage(), e);
+//            return buildErrorResponse("抱歉，处理您的问题时出现错误：" + e.getMessage());
+//        }
+//    }
+//
+//    /**
+//     * 获取票据信息摘要（用于AI问答上下文）
+//     */
+//    @Override
+//    public String getBillSummary(Long billId) {
+//        BizBill bill = billMapper.selectById(billId);
+//        if (bill == null) {
+//            return null;
+//        }
+//
+//        StringBuilder summary = new StringBuilder();
+//        summary.append("票据编号：").append(bill.getBillNo()).append("\n");
+//        summary.append("标题：").append(bill.getTitle()).append("\n");
+//
+//        if (bill.getCategoryId() != null) {
+//            BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//            if (category != null) {
+//                summary.append("类别：").append(category.getCategoryName()).append("\n");
+//            }
+//        }
+//
+//        summary.append("金额：¥").append(bill.getAmount()).append("\n");
+//        summary.append("状态：").append(STATUS_MAP[Integer.parseInt(bill.getStatus())]).append("\n");
+//
+//        if (bill.getDescription() != null && !bill.getDescription().isEmpty()) {
+//            summary.append("描述：").append(bill.getDescription()).append("\n");
+//        }
+//
+//        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+//        summary.append("创建时间：").append(sdf.format(bill.getCreateTime())).append("\n");
+//
+//        if (bill.getAuditTime() != null) {
+//            summary.append("审核时间：").append(sdf.format(bill.getAuditTime())).append("\n");
+//            summary.append("审核人：").append(bill.getAuditBy()).append("\n");
+//            if (bill.getAuditComment() != null) {
+//                summary.append("审核意见：").append(bill.getAuditComment());
+//            }
+//        }
+//
+//        return summary.toString();
+//    }
+//
+//    /**
+//     * 处理针对特定票据的问题
+//     */
+//    private AiChatResponseVo handleBillSpecificQuestion(Long billId, String question) {
+//        BizBill bill = billMapper.selectById(billId);
+//        if (bill == null) {
+//            return buildErrorResponse("未找到该票据信息");
+//        }
+//
+//        // 检查权限：只能查看自己的票据或管理员可以查看所有
+//        if (!SecurityUtils.hasPermi("biz:bill:review")
+//                && !SecurityUtils.getUsername().equals(bill.getCreateBy())) {
+//            return buildErrorResponse("您无权查看此票据信息");
+//        }
+//
+//        String lowerQuestion = question.toLowerCase();
+//
+//        // 1. 询问票据状态
+//        if (lowerQuestion.contains("状态") || lowerQuestion.contains("status")) {
+//            String statusText = STATUS_MAP[Integer.parseInt(bill.getStatus())];
+//            return buildSuccessResponse(
+//                    String.format("票据【%s】的状态是：%s", bill.getTitle(), statusText),
+//                    billId,
+//                    "您可以通过'我的票据'页面查看详细进度"
+//            );
+//        }
+//
+//        // 2. 询问票据金额
+//        if (lowerQuestion.contains("金额") || lowerQuestion.contains("多少钱") || lowerQuestion.contains("price")) {
+//            return buildSuccessResponse(
+//                    String.format("票据【%s】的金额为：¥%s", bill.getTitle(), bill.getAmount()),
+//                    billId,
+//                    "如需修改金额，请在草稿状态下编辑"
+//            );
+//        }
+//
+//        // 3. 询问票据类别
+//        if (lowerQuestion.contains("类别") || lowerQuestion.contains("类型") || lowerQuestion.contains("category")) {
+//            String categoryName = "未知";
+//            if (bill.getCategoryId() != null) {
+//                BizCategory category = categoryMapper.selectById(bill.getCategoryId());
+//                if (category != null) {
+//                    categoryName = category.getCategoryName();
+//                }
+//            }
+//            return buildSuccessResponse(
+//                    String.format("票据【%s】的类别是：%s", bill.getTitle(), categoryName),
+//                    billId,
+//                    null
+//            );
+//        }
+//
+//        // 4. 询问审核情况
+//        if (lowerQuestion.contains("审核") || lowerQuestion.contains("audit")) {
+//            if ("0".equals(bill.getStatus()) || "1".equals(bill.getStatus())) {
+//                return buildSuccessResponse(
+//                        String.format("票据【%s】尚未完成审核。当前状态：%s",
+//                                bill.getTitle(), STATUS_MAP[Integer.parseInt(bill.getStatus())]),
+//                        billId,
+//                        "请耐心等待审核人员处理"
+//                );
+//            } else {
+//                String auditResult = "2".equals(bill.getStatus()) ? "通过" : "退回";
+//                String comment = bill.getAuditComment() != null ? bill.getAuditComment() : "无";
+//                return buildSuccessResponse(
+//                        String.format("票据【%s】审核结果：%s\n审核人：%s\n审核意见：%s",
+//                                bill.getTitle(), auditResult, bill.getAuditBy(), comment),
+//                        billId,
+//                        "2".equals(bill.getStatus()) ? "恭喜！票据审核通过" : "请根据审核意见修改后重新提交"
+//                );
+//            }
+//        }
+//
+//        // 5. 询问票据详情
+//        if (lowerQuestion.contains("详情") || lowerQuestion.contains("detail") || lowerQuestion.contains("信息")) {
+//            String summary = getBillSummary(billId);
+//            return buildSuccessResponse(
+//                    "以下是票据详细信息：\n" + summary,
+//                    billId,
+//                    "您可以点击'票据概览'查看完整详情和附件"
+//            );
+//        }
+//
+//        // 6. 默认回复
+//        return buildSuccessResponse(
+//                String.format("关于票据【%s】，您可以询问：\n1. 状态是什么？\n2. 金额是多少？\n3. 属于什么类别？\n4. 审核情况如何？\n5. 查看详细信息",
+//                        bill.getTitle()),
+//                billId,
+//                "请选择具体问题或点击'票据概览'查看详情"
+//        );
+//    }
+//
+//    /**
+//     * 处理通用问题
+//     */
+//    private AiChatResponseVo handleGeneralQuestion(String question) {
+//        String lowerQuestion = question.toLowerCase();
+//
+//        // 1. 询问如何提交票据
+//        if (lowerQuestion.contains("怎么提交") || lowerQuestion.contains("如何提交") || lowerQuestion.contains("submit")) {
+//            return buildSuccessResponse(
+//                    "提交票据步骤：\n" +
+//                            "1. 在'我的票据'页面点击'新增'\n" +
+//                            "2. 填写票据信息并上传附件\n" +
+//                            "3. 保存为草稿或直接提交\n" +
+//                            "4. 如保存草稿，可在草稿列表点击'提交审核'",
+//                    null,
+//                    "现在就去'我的票据'页面创建新票据吧！"
+//            );
+//        }
+//
+//        // 2. 询问票据流程
+//        if (lowerQuestion.contains("流程") || lowerQuestion.contains("procedure") || lowerQuestion.contains("process")) {
+//            return buildSuccessResponse(
+//                    "票据报销流程：\n" +
+//                            "1. 用户创建票据（草稿状态）\n" +
+//                            "2. 用户提交审核（已提交状态）\n" +
+//                            "3. 审核员审核（通过/退回）\n" +
+//                            "4. 通过后状态变为'已通过'，可下载附件\n" +
+//                            "5. 退回后状态变为'已退回'，需修改后重新提交",
+//                    null,
+//                    "您可以在'票据概览'页面查看各类票据的统计信息"
+//            );
+//        }
+//
+//        // 3. 询问附件相关
+//        if (lowerQuestion.contains("附件") || lowerQuestion.contains("attachment") || lowerQuestion.contains("文件")) {
+//            return buildSuccessResponse(
+//                    "附件管理说明：\n" +
+//                            "• 支持格式：PDF、图片(JPG/PNG)、Word、Excel等\n" +
+//                            "• 单文件大小限制：50MB\n" +
+//                            "• 可在线预览：PDF和图片格式\n" +
+//                            "• 已审核通过的票据可下载附件",
+//                    null,
+//                    "在票据详情页可查看和预览附件"
+//            );
+//        }
+//
+//        // 4. 询问审核标准
+//        if (lowerQuestion.contains("审核标准") || lowerQuestion.contains("要求") || lowerQuestion.contains("standard")) {
+//            return buildSuccessResponse(
+//                    "票据审核要点：\n" +
+//                            "1. 票据信息完整性（标题、类别、金额、描述）\n" +
+//                            "2. 附件齐全且清晰可读\n" +
+//                            "3. 金额与附件一致\n" +
+//                            "4. 符合公司财务规定\n" +
+//                            "5. 日期合理且在有效期内",
+//                    null,
+//                    "确保票据信息准确完整可提高审核通过率"
+//            );
+//        }
+//
+//        // 5. 询问常见问题
+//        if (lowerQuestion.contains("常见问题") || lowerQuestion.contains("faq") || lowerQuestion.contains("帮助")) {
+//            return buildSuccessResponse(
+//                    "常见问题解答：\n" +
+//                            "Q: 为什么无法编辑票据？\n" +
+//                            "A: 只有草稿和已退回状态的票据可以编辑\n\n" +
+//                            "Q: 如何撤回已提交的票据？\n" +
+//                            "A: 已提交的票据无法撤回，请联系审核员\n\n" +
+//                            "Q: 附件上传失败怎么办？\n" +
+//                            "A: 检查文件格式和大小，确保不超过50MB\n\n" +
+//                            "Q: 审核需要多长时间？\n" +
+//                            "A: 一般1-3个工作日，具体时间取决于审核员工作量",
+//                    null,
+//                    "如有其他问题，请联系系统管理员"
+//            );
+//        }
+//
+//        // 6. 询问票据统计
+//        if (lowerQuestion.contains("统计") || lowerQuestion.contains("summary") || lowerQuestion.contains("汇总")) {
+//            return buildSuccessResponse(
+//                    "票据统计功能：\n" +
+//                            "• 票据概览页面可查看各类别金额汇总\n" +
+//                            "• 可查看本月提交趋势\n" +
+//                            "• 可按状态筛选查看票据分布\n" +
+//                            "• 审核员可查看个人审核统计",
+//                    null,
+//                    "点击左侧菜单'票据概览'查看详细统计"
+//            );
+//        }
+//
+//        // 7. 默认回复
+//        return buildSuccessResponse(
+//                "您好！我是票据助手，可以帮您：\n" +
+//                        "• 查询票据信息（需提供票据ID）\n" +
+//                        "• 解答票据提交流程问题\n" +
+//                        "• 说明审核标准和注意事项\n" +
+//                        "• 指导附件管理和下载\n\n" +
+//                        "您可以直接提问，例如：\n" +
+//                        "'这张票据的状态是什么？'（需在票据详情页使用）\n" +
+//                        "'怎么提交票据？'\n" +
+//                        "'附件有什么要求？'",
+//                null,
+//                "选择具体问题进行咨询"
+//        );
+//    }
+//
+//    /**
+//     * 构建成功响应
+//     */
+//    private AiChatResponseVo buildSuccessResponse(String answer, Long billId, String suggestion) {
+//        return AiChatResponseVo.builder()
+//                .answer(answer)
+//                .success(true)
+//                .billId(billId)
+//                .suggestion(suggestion)
+//                .build();
+//    }
+//
+//    /**
+//     * 构建错误响应
+//     */
+//    private AiChatResponseVo buildErrorResponse(String message) {
+//        return AiChatResponseVo.builder()
+//                .answer(message)
+//                .success(false)
+//                .billId(null)
+//                .suggestion(null)
+//                .build();
+//    }
+//}
+

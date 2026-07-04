@@ -76,20 +76,20 @@
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
-                <span>各类别金额汇总</span>
+                <span>审核趋势分析</span>
               </div>
             </template>
-            <div ref="categoryChartRef" class="chart-container"></div>
+            <div ref="reviewTrendChartRef" class="chart-container"></div>
           </el-card>
         </el-col>
         <el-col :xs="24" :sm="24" :md="12" :lg="8">
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
-                <span>本月审核趋势</span>
+                <span>审核构成分析</span>
               </div>
             </template>
-            <div ref="trendChartRef" class="chart-container"></div>
+            <div ref="reviewCompositionChartRef" class="chart-container"></div>
           </el-card>
         </el-col>
         <el-col :xs="24" :sm="24" :md="12" :lg="8">
@@ -278,7 +278,7 @@ import * as echarts from 'echarts'
 import { useRouter } from 'vue-router'
 import useSettingsStore from '@/store/modules/settings'
 import useUserStore from '@/store/modules/user'
-import { listBill, getCategorySummary, getTrend, getReviewerStats } from '@/api/biz/bill'
+import { listBill, getCategorySummary, getTrend, getReviewerStats, getReviewTrend, getReviewComposition } from '@/api/biz/bill'
 
 const { proxy } = getCurrentInstance()
 const settingsStore = useSettingsStore()
@@ -293,6 +293,8 @@ const statusChartRef = ref(null)
 const categoryChartRef = ref(null)
 const userCategoryChartRef = ref(null)
 const trendChartRef = ref(null)
+const reviewTrendChartRef = ref(null)
+const reviewCompositionChartRef = ref(null)
 const loading = ref(false)
 const reviewerLoading = ref(false)
 
@@ -360,6 +362,98 @@ function initTrendChart(data) {
   window.addEventListener('resize', () => chart.resize())
 }
 
+// ==================== 审核员新图表 ====================
+function initReviewTrendChart(data) {
+  if (!reviewTrendChartRef.value) return
+  const chart = echarts.init(reviewTrendChartRef.value)
+  const dark = isDark()
+  // 如果数据为空，生成近12个月的空壳月份标签
+  if (!data || data.length === 0) {
+    const now = new Date()
+    data = []
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+      const m = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+      data.push({ month: m, count: 0, passRate: 0 })
+    }
+  }
+  chart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      formatter: p => {
+        let s = p[0].name + '<br/>'
+        p.forEach(item => {
+          s += item.marker + ' ' + item.seriesName + ': ' + (item.seriesName === '通过率' ? item.value + '%' : item.value) + '<br/>'
+        })
+        return s
+      }
+    },
+    legend: { data: ['审核单量', '通过率'], textStyle: { color: dark ? '#ccc' : '#333' } },
+    grid: { left: '3%', right: '6%', bottom: '3%', containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: data.map(d => d.month),
+      name: '月份',
+      nameTextStyle: { color: dark ? '#ccc' : '#666' },
+      axisLabel: { color: dark ? '#aaa' : '#666', rotate: 30 },
+      boundaryGap: false
+    },
+    yAxis: [
+      { type: 'value', name: '审核单量(笔)', nameTextStyle: { color: dark ? '#ccc' : '#666' }, axisLabel: { color: dark ? '#aaa' : '#666' }, minInterval: 1 },
+      { type: 'value', name: '通过率(%)', nameTextStyle: { color: dark ? '#ccc' : '#666' }, axisLabel: { color: dark ? '#aaa' : '#666', formatter: '{value}%' }, max: 100, min: 0 }
+    ],
+    series: [
+      {
+        name: '审核单量', type: 'line', smooth: true,
+        data: data.map(d => d.count),
+        itemStyle: { color: '#4facfe' },
+        lineStyle: { width: 3 },
+        symbolSize: 6,
+        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(79, 172, 254, 0.4)' }, { offset: 1, color: 'rgba(79, 172, 254, 0.02)' }]) }
+      },
+      {
+        name: '通过率', type: 'line', smooth: true, yAxisIndex: 1,
+        data: data.map(d => d.passRate),
+        itemStyle: { color: '#43e97b' },
+        lineStyle: { width: 3, type: 'dashed' },
+        symbolSize: 6
+      }
+    ]
+  })
+  window.addEventListener('resize', () => chart.resize())
+}
+
+function initReviewCompositionChart(data) {
+  if (!reviewCompositionChartRef.value) return
+  const chart = echarts.init(reviewCompositionChartRef.value)
+  const dark = isDark()
+  const colors = ['#667eea', '#43e97b', '#f56c6c', '#4facfe', '#fa709a', '#e6a23c', '#f093fb', '#fee140']
+  // 数据为空时显示提示
+  if (!data || data.length === 0) {
+    chart.setOption({
+      title: { text: '暂无审核通过数据', left: 'center', top: 'center', textStyle: { color: dark ? '#999' : '#aaa', fontSize: 14 } },
+      series: []
+    })
+    return
+  }
+  chart.setOption({
+    tooltip: { trigger: 'item', formatter: p => `${p.name}<br/>金额: ¥${Number(p.value).toLocaleString()}<br/>占比: ${p.percent}%` },
+    legend: {
+      orient: 'vertical', left: 'left', top: 'middle',
+      textStyle: { color: dark ? '#ccc' : '#333' },
+      data: data.map(d => d.categoryName)
+    },
+    color: colors,
+    series: [{
+      name: '费用构成', type: 'pie', radius: ['40%', '70%'], center: ['62%', '50%'],
+      label: { color: dark ? '#ccc' : '#333', formatter: '{b}\n{d}%' },
+      data: data.map((d, i) => ({ value: d.amount, name: d.categoryName, itemStyle: { color: colors[i % colors.length] } })),
+      emphasis: { itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.5)' } }
+    }]
+  })
+  window.addEventListener('resize', () => chart.resize())
+}
+
 // ==================== 普通用户图表 ====================
 function initStatusChart() {
   if (!statusChartRef.value) return
@@ -409,8 +503,14 @@ function loadReviewerData() {
   }).finally(() => {
     reviewerLoading.value = false
     nextTick(() => {
-      getCategorySummary().then(res => initCategoryChart(res.data || [])).catch(() => initCategoryChart([]))
-      getTrend().then(res => initTrendChart(res.data || [])).catch(() => initTrendChart([]))
+      getReviewTrend().then(res => {
+        console.log('[审核趋势] API返回:', JSON.stringify(res.data))
+        initReviewTrendChart(res.data || [])
+      }).catch(err => { console.warn('[审核趋势] 接口异常:', err); initReviewTrendChart([]) })
+      getReviewComposition().then(res => {
+        console.log('[审核构成] API返回:', JSON.stringify(res.data))
+        initReviewCompositionChart(res.data || [])
+      }).catch(err => { console.warn('[审核构成] 接口异常:', err); initReviewCompositionChart([]) })
     })
   })
 }

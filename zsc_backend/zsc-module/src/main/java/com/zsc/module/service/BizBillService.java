@@ -11,8 +11,10 @@ import com.zsc.module.domain.vo.BizBillVo;
 import com.zsc.module.domain.vo.TrendItemVo;
 
 import com.zsc.module.domain.vo.ReviewerStatsVo;
+import com.zsc.module.domain.vo.ReviewTrendVo;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 票据表 服务类
@@ -67,5 +69,15 @@ public interface BizBillService extends IService<BizBill> {
      * 删除用户时清理其非通过状态的票据（草稿/待审/退回 + 附件 + 审核记录）
      */
     void deleteNonApprovedBillsByUser(String username);
+
+    /**
+     * 近12个月审核趋势（审核单量 + 通过率）
+     */
+    List<ReviewTrendVo> getReviewTrend();
+
+    /**
+     * 审核构成分析：按费用类型统计通过金额占比
+     */
+    List<Map<String, Object>> getReviewComposition();
 
 }

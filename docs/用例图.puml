@@ -1,0 +1,39 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+
+actor "普通用户" as User
+actor "审核员" as Reviewer
+actor "管理员" as AdminUser
+actor "超管" as Admin
+
+rectangle "票据审核系统" {
+  User --> (注册账号)
+  User --> (登录/退出)
+  User --> (新增票据)
+  User --> (修改/删除草稿)
+  User --> (提交审核)
+  User --> (查看个人票据)
+  User --> (上传附件)
+  User --> (个人仪表盘)
+
+  Reviewer --> (登录/退出)
+  Reviewer --> (审核票据)
+  Reviewer --> (批量审核)
+  Reviewer --> (积压预警)
+  Reviewer --> (审核统计仪表盘)
+
+  AdminUser --> (登录/退出)
+  AdminUser --> (用户管理)
+  AdminUser --> (审批注册申请)
+  AdminUser --> (类别管理)
+  AdminUser --> (操作日志)
+  AdminUser --> (自动导出配置)
+
+  Admin --> (全局数据监控)
+  Admin --> (审核员工作量统计)
+  Admin --> (创建管理员账号)
+  Admin --> (系统日志查看)
+  Admin --> (AI智能助手)
+}
+@enduml

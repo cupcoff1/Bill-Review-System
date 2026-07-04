@@ -1,0 +1,31 @@
+graph TD
+    subgraph U[" "]
+        direction LR
+        USER((普通用户 user))
+        U1[注册账号] --- U2[登录/退出] --- U3[新增票据] --- U4[修改删除草稿] --- U5[提交审核] --- U6[查看个人票据] --- U7[上传附件] --- U8[个人仪表盘]
+    end
+
+    subgraph R[" "]
+        direction LR
+        REVIEWER((审核员 reviewer))
+        R1[审核票据] --- R2[批量审核] --- R3[积压预警] --- R4[审核统计仪表盘]
+    end
+
+    subgraph A[" "]
+        direction LR
+        ADMIN_USER((管理员 admin_user))
+        A1[用户管理] --- A2[审批注册申请] --- A3[类别管理] --- A4[操作日志查看] --- A5[自动导出配置]
+    end
+
+    subgraph S[" "]
+        direction LR
+        ADMIN((超管 admin))
+        S1[全局数据监控] --- S2[审核员工作量统计] --- S3[创建管理员] --- S4[系统日志查看] --- S5[AI智能助手]
+    end
+
+    U --> R --> A --> S
+
+    style USER fill:#E3F2FD,stroke:#1565C0
+    style REVIEWER fill:#E8F5E9,stroke:#2E7D32
+    style ADMIN_USER fill:#FFF3E0,stroke:#E65100
+    style ADMIN fill:#FCE4EC,stroke:#C62828
